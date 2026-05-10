@@ -1,6 +1,9 @@
 # Assignment docs
 Definition/
 
+# Direnv cache
+.direnv/
+
 .ruff*
 pyrightconfig.json
 .*hints
