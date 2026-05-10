@@ -32,6 +32,7 @@
           pip install keras
           pip install numpy optree
           pip install ipython pgmpy tqdm fastapi uvicorn nltk websockets
+          pip install pytest
         '';
 
         postShellHook = ''
