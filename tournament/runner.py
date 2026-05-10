@@ -314,12 +314,15 @@ def print_summary(results: Dict[str, Any]) -> None:
     draws = results["draws"]
     avg_len = results["avg_game_length"]
 
+    label1 = f"Agent 1 ({name1})"
+    label2 = f"Agent 2 ({name2})"
+
     print("=" * 60)
     print(f"TOURNAMENT RESULTS: {name1} vs {name2}")
     print("=" * 60)
     print(f"{'Total games:':<20}{total:>8}")
-    print(f"{name1 + ' wins:':<20}{w1:>8} ({w1 / total * 100:.1f}%)" if total > 0 else f"{name1 + ' wins:':<20}{w1:>8}")
-    print(f"{name2 + ' wins:':<20}{w2:>8} ({w2 / total * 100:.1f}%)" if total > 0 else f"{name2 + ' wins:':<20}{w2:>8}")
+    print(f"{label1 + ' wins:':<20}{w1:>8} ({w1 / total * 100:.1f}%)" if total > 0 else f"{label1 + ' wins:':<20}{w1:>8}")
+    print(f"{label2 + ' wins:':<20}{w2:>8} ({w2 / total * 100:.1f}%)" if total > 0 else f"{label2 + ' wins:':<20}{w2:>8}")
     print(f"{'Draws:':<20}{draws:>8} ({draws / total * 100:.1f}%)" if total > 0 else f"{'Draws:':<20}{draws:>8}")
     print(f"{'Avg game length:':<20}{avg_len:>8.1f} moves")
     print("=" * 60)
