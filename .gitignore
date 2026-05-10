@@ -4,6 +4,9 @@ Definition/
 # Direnv cache
 .direnv/
 
+# Tournament logs
+stats/
+
 .ruff*
 pyrightconfig.json
 .*hints
