@@ -41,6 +41,8 @@ class TestRunTournament:
             expected_keys = {
                 "agent1_wins", "agent2_wins", "draws", "total_games",
                 "agent1_name", "agent2_name", "avg_game_length",
+                "avg_game_time", "max_game_time", "min_game_time",
+                "total_time"
             }
             assert set(results.keys()) == expected_keys
 
@@ -180,6 +182,10 @@ class TestRunTournament:
             "agent2_wins": 5,
             "draws": 3,
             "avg_game_length": 42.3,
+            "avg_game_time": 1.23,
+            "max_game_time": 5.67,
+            "min_game_time": 0.01,
+            "total_time": 4.17
         }
         print_summary(results)
         captured = capsys.readouterr()
@@ -188,6 +194,8 @@ class TestRunTournament:
         assert "Dummy" in captured.out
         assert "92" in captured.out
         assert "42.3" in captured.out
+        assert "1.23" in captured.out
+        assert "4.17" in captured.out
 
     def test_log_files_created(self) -> None:
         """Tournament run creates local and global CSV files."""

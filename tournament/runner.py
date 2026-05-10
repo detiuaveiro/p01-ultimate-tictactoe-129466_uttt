@@ -9,6 +9,7 @@ import argparse
 import json
 import logging
 import sys
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from tqdm import tqdm
@@ -132,7 +133,8 @@ def run_tournament(
     Returns:
         Dict with keys: ``agent1_wins``, ``agent2_wins``, ``draws``,
         ``total_games``, ``agent1_name``, ``agent2_name``,
-        ``avg_game_length``.
+        ``avg_game_length``, ``avg_game_time``, ``max_game_time``,
+        ``min_game_time``, ``total_time``.
     """
     logger = StatsLogger(log_dir=log_dir)
 
@@ -146,6 +148,7 @@ def run_tournament(
     agent2_wins = 0
     draws = 0
     total_game_lengths: List[int] = []
+    total_game_times: List[float] = []
 
     # --- Build game iterator (tqdm when not verbose) ---
     game_range = range(num_games)
@@ -184,6 +187,7 @@ def run_tournament(
             )
 
         # --- Play the game ---
+        game_start = time.monotonic()
         state = UTTTState()
         prev_macro = [[0] * 3 for _ in range(3)]
         local_games_seen: set = set()
@@ -261,6 +265,9 @@ def run_tournament(
         if not crash_or_illegal and game_result is None:
             game_result = state.get_winner()
 
+        game_elapsed = time.monotonic() - game_start
+        total_game_times.append(game_elapsed)
+
         # --- Update win/draw counters ---
         # Map P1/P2 result to agent1/agent2
         if game_idx % 2 == 0:
@@ -316,6 +323,10 @@ def run_tournament(
         "agent1_name": agent1_name,
         "agent2_name": agent2_name,
         "avg_game_length": avg_length,
+        "avg_game_time": sum(total_game_times) / len(total_game_times) if total_game_times else 0.0,
+        "max_game_time": max(total_game_times) if total_game_times else 0.0,
+        "min_game_time": min(total_game_times) if total_game_times else 0.0,
+        "total_time": sum(total_game_times) if total_game_times else 0.0,
     }
 
 
@@ -349,6 +360,10 @@ def print_summary(results: Dict[str, Any]) -> None:
     print(f"{label2 + ' wins:':<20}{w2:>8} ({w2 / total * 100:.1f}%)" if total > 0 else f"{label2 + ' wins:':<20}{w2:>8}")
     print(f"{'Draws:':<20}{draws:>8} ({draws / total * 100:.1f}%)" if total > 0 else f"{'Draws:':<20}{draws:>8}")
     print(f"{'Avg game length:':<20}{avg_len:>8.1f} moves")
+    print(f"{'Avg game time:':<20}{results['avg_game_time']:>8.2f}s")
+    print(f"{'Max game time:':<20}{results['max_game_time']:>8.2f}s")
+    print(f"{'Min game time:':<20}{results['min_game_time']:>8.2f}s")
+    print(f"{'Total tournament time:':<20}{results['total_time']:>8.2f}s")
     print("=" * 60)
 
 
