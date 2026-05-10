@@ -1,3 +1,1 @@
-from logger.stats_logger import StatsLogger
-
-__all__ = ["StatsLogger"]
+# Logger package for Ultimate Tic-Tac-Toe.
