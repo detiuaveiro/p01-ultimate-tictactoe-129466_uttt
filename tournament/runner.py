@@ -11,6 +11,8 @@ import logging
 import sys
 from typing import Any, Dict, List, Optional, Tuple
 
+from tqdm import tqdm
+
 from agents.dummy_agent import DummyUTTTAgent
 from agents.mcts_agent import MCTSAgent
 from engine.game_state import UTTTState
@@ -145,7 +147,14 @@ def run_tournament(
     draws = 0
     total_game_lengths: List[int] = []
 
-    for game_idx in range(num_games):
+    # --- Build game iterator (tqdm when not verbose) ---
+    game_range = range(num_games)
+    if verbose or num_games == 0:
+        game_iter: Any = game_range
+    else:
+        game_iter = tqdm(game_range, desc="Tournament", unit="game")
+
+    for game_idx in game_iter:
         # --- Alternate first player ---
         if game_idx % 2 == 0:
             p1_proto, p2_proto = agent1, agent2
@@ -195,22 +204,28 @@ def run_tournament(
             try:
                 action = current_agent.deliberate_from_state(state)
             except Exception as exc:
+                msg = (
+                    f"  Player {state.current_player} ({current_agent.__class__.__name__}) "
+                    f"crashed: {exc}"
+                )
                 if verbose:
-                    print(
-                        f"  Player {state.current_player} ({current_agent.__class__.__name__}) "
-                        f"crashed: {exc}"
-                    )
+                    print(msg)
+                else:
+                    tqdm.write(msg)
                 crash_or_illegal = True
                 game_result = 2 if state.current_player == 1 else 1  # opponent wins
                 break
 
             # --- Validate action ---
             if action is None or action not in valid:
+                msg = (
+                    f"  Player {state.current_player} ({current_agent.__class__.__name__}) "
+                    f"illegal move: {action}"
+                )
                 if verbose:
-                    print(
-                        f"  Player {state.current_player} ({current_agent.__class__.__name__}) "
-                        f"illegal move: {action}"
-                    )
+                    print(msg)
+                else:
+                    tqdm.write(msg)
                 crash_or_illegal = True
                 game_result = 2 if state.current_player == 1 else 1  # opponent wins
                 break
@@ -277,6 +292,15 @@ def run_tournament(
             p2_config=p2_config_str,
             round_number=game_idx + 1,
         )
+
+        # --- Update tqdm description with running win rates ---
+        if not verbose and num_games > 0:
+            games_done = game_idx + 1
+            w1_pct = agent1_wins / games_done * 100
+            w2_pct = agent2_wins / games_done * 100
+            game_iter.set_description(
+                f"{agent1_name} {w1_pct:.0f}% | {agent2_name} {w2_pct:.0f}%"
+            )
 
     avg_length = (
         sum(total_game_lengths) / len(total_game_lengths)
