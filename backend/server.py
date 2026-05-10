@@ -6,6 +6,14 @@ from typing import Any, Dict, List, Optional
 import websockets
 from websockets.server import WebSocketServerProtocol
 
+from engine.game_rules import (
+    check_3x3_win as rules_check_3x3_win,
+    get_global_winner,
+    get_valid_actions as rules_get_valid_actions,
+    is_3x3_full as rules_is_3x3_full,
+    apply_move as rules_apply_move,
+)
+
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
@@ -166,22 +174,7 @@ class UTTTServer:
         Returns:
             List[List[int]]: A list of [x, y] coordinates representing valid moves.
         """
-        actions: List[List[int]] = []
-        for y in range(9):
-            for x in range(9):
-                my, mx = y // 3, x // 3
-                # Cannot play in a resolved macro-board
-                if self.macro_board[my][mx] != 0:
-                    continue
-                # Cannot play in an occupied cell
-                if self.board[y][x] != 0:
-                    continue
-                # Must play in the active macro-board, unless free move is granted
-                if self.active_macro is not None and self.active_macro != [my, mx]:
-                    continue
-
-                actions.append([x, y])
-        return actions
+        return rules_get_valid_actions(self.board, self.macro_board, self.active_macro)
 
     def process_move(self, player_id: int, x: int, y: int) -> bool:
         """
@@ -198,23 +191,9 @@ class UTTTServer:
         if [x, y] not in self.get_valid_actions():
             return False
 
-        self.board[y][x] = player_id
-        my, mx = y // 3, x // 3
-        micro_y, micro_x = y % 3, x % 3
-
-        # Check if this move won the local macro-board
-        local_winner = self.check_3x3_win(self.board, mx * 3, my * 3)
-        if local_winner:
-            self.macro_board[my][mx] = local_winner
-        elif self.is_3x3_full(self.board, mx * 3, my * 3):
-            self.macro_board[my][mx] = 3  # Draw
-
-        # Set next active macro-board
-        next_my, next_mx = micro_y, micro_x
-        if self.macro_board[next_my][next_mx] != 0:
-            self.active_macro = None  # Free move!
-        else:
-            self.active_macro = [next_my, next_mx]
+        self.board, self.macro_board, self.active_macro = rules_apply_move(
+            self.board, self.macro_board, player_id, x, y
+        )
 
         return True
 
@@ -222,51 +201,23 @@ class UTTTServer:
         """
         Checks for a win in a specific 3x3 subset of a grid.
 
+        Delegates to engine.game_rules.check_3x3_win.
+
         Args:
             grid (List[List[int]]): The grid to check (9x9 or 3x3).
             start_x (int): The starting x-coordinate of the 3x3 subset.
             start_y (int): The starting y-coordinate of the 3x3 subset.
 
         Returns:
-            int: The ID of the winning player (1 or 2), 0 if no winner, 3 if draw.
+            int: The ID of the winning player (1 or 2), 0 if no winner.
         """
-        for i in range(3):
-            # Rows
-            if (
-                grid[start_y + i][start_x] != 0
-                and grid[start_y + i][start_x]
-                == grid[start_y + i][start_x + 1]
-                == grid[start_y + i][start_x + 2]
-            ):
-                return grid[start_y + i][start_x]
-            # Cols
-            if (
-                grid[start_y][start_x + i] != 0
-                and grid[start_y][start_x + i]
-                == grid[start_y + 1][start_x + i]
-                == grid[start_y + 2][start_x + i]
-            ):
-                return grid[start_y][start_x + i]
-        # Diagonals
-        if (
-            grid[start_y][start_x] != 0
-            and grid[start_y][start_x]
-            == grid[start_y + 1][start_x + 1]
-            == grid[start_y + 2][start_x + 2]
-        ):
-            return grid[start_y][start_x]
-        if (
-            grid[start_y + 2][start_x] != 0
-            and grid[start_y + 2][start_x]
-            == grid[start_y + 1][start_x + 1]
-            == grid[start_y][start_x + 2]
-        ):
-            return grid[start_y + 2][start_x]
-        return 0
+        return rules_check_3x3_win(grid, start_x, start_y)
 
     def is_3x3_full(self, grid: List[List[int]], start_x: int, start_y: int) -> bool:
         """
         Checks if a 3x3 subset of a grid is full.
+
+        Delegates to engine.game_rules.is_3x3_full.
 
         Args:
             grid (List[List[int]]): The grid to check.
@@ -276,24 +227,18 @@ class UTTTServer:
         Returns:
             bool: True if the 3x3 subset is full, False otherwise.
         """
-        for y in range(3):
-            for x in range(3):
-                if grid[start_y + y][start_x + x] == 0:
-                    return False
-        return True
+        return rules_is_3x3_full(grid, start_x, start_y)
 
     async def check_game_over(self) -> None:
         """
         Checks if the game is over and handles the results.
         """
-        # Treat the macro_board as a standard Tic-Tac-Toe board
-        winner = self.check_3x3_win(self.macro_board, 0, 0)
-        is_draw = self.is_3x3_full(self.macro_board, 0, 0)
+        winner = get_global_winner(self.macro_board)
 
         if winner in [1, 2]:
             self.match_scores[winner] += 1
             await self.end_round(f"Player {winner} Wins!")
-        elif is_draw or winner == 3:
+        elif winner == 3:
             await self.end_round("Global Draw!")
 
     async def end_round(self, message: str) -> None:
@@ -352,11 +297,6 @@ class UTTTServer:
                     }
                 )
             )
-
-
-if __name__ == "__main__":
-    server = UTTTServer()
-    asyncio.run(server.start())
 
 
 if __name__ == "__main__":

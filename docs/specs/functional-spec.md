@@ -1,11 +1,12 @@
 # Functional Specification: SI2 Ultimate Tic-Tac-Toe Autonomous Agents
 
-> **Version**: 0.2.0 | **Date**: 2026-05-10 | **Author**: Documenter Agent | **Status**: Draft
+> **Version**: 0.3.0 | **Date**: 2026-05-10 | **Author**: Documenter Agent | **Status**: Active
 
 ## Change Log
 
 | Version | Date       | Author           | Changes                                                  |
 |---------|------------|------------------|----------------------------------------------------------|
+| 0.3.0   | 2026-05-10 | Documenter Agent | Phase 1 implementation: extracted shared game_rules.py from server.py; UTTTState (FR-001), MCTS (FR-002), MCTSAgent (FR-003) implemented; statuses updated to "Implemented"; 66 tests added |
 | 0.2.0   | 2026-05-10 | Documenter Agent | Added AlphaZero-lite (Phase 3) requirements (FR-009, FR-010, FR-011); declared infrastructure immutability principle |
 | 0.1.0   | 2026-05-10 | Documenter Agent | Initial draft — all requirements defined, no implementation |
 
@@ -57,6 +58,7 @@ This specification serves as the single source of truth for the project's scope,
 - `README.md` — Project overview, setup instructions, and basic usage
 - `agents/base_agent.py` — Abstract base class for all agents
 - `backend/server.py` — Existing game server with complete UTTT game logic
+- `engine/game_rules.py` — Shared stateless game rules used by both UTTTState and the backend server (extracted from server.py during Phase 1)
 - Research: "Monte Carlo Tree Search: A New Framework for Game AI" (Browne et al., 2012)
 - Research: "MCTS for Ultimate Tic-Tac-Toe" — various university project analyses and blog posts
 
@@ -91,17 +93,18 @@ The existing codebase provides:
 
 After implementation, the system will have:
 
-1. **Standalone game engine** (`engine/`): A `UTTTState` class that mirrors the server's game logic but is pure-Python and independent of WebSockets, designed for rapid MCTS simulation.
-2. **MCTS algorithm** (`engine/mcts_core.py`): A generic, reusable UCT-based MCTS implementation.
-3. **Heuristic evaluation** (`engine/heuristics.py`): Weighted board-state evaluation based on established UTTT strategic principles.
-4. **Three intelligent agents**: 
+1. **Shared game rules** (`engine/game_rules.py`): Pure stateless functions (`apply_move`, `get_valid_actions`, `get_global_winner`, `check_3x3_win`, `is_3x3_full`) extracted from the backend server, shared by both `UTTTState` and any other component needing game logic.
+2. **Standalone game engine** (`engine/`): A `UTTTState` class that wraps the shared game rules in an immutable state object, designed for rapid MCTS simulation and independent of WebSockets.
+3. **MCTS algorithm** (`engine/mcts_core.py`): A generic, reusable UCT-based MCTS implementation.
+4. **Heuristic evaluation** (`engine/heuristics.py`): Weighted board-state evaluation based on established UTTT strategic principles.
+5. **Three intelligent agents**: 
    - `MCTSAgent` — pure MCTS with random playouts (Phase 1)
    - `MCTSHeuristicAgent` — MCTS with heuristic-guided rollouts and leaf evaluation (Phase 2)
    - `AlphaZeroUTTTAgent` — MCTS guided by a neural policy-value network, trained via self-play (Phase 3)
-5. **Policy-Value Network** (`engine/policy_value_network.py`): A convolutional neural network that takes board state as input and outputs move probabilities and position evaluation.
-6. **Self-play training pipeline**: Generates training data through MCTS-guided self-play, trains the neural network, and iteratively improves both.
-7. **Statistics logger** (`logger/stats_logger.py`): CSV-based logging of local and global game outcomes.
-8. **Test and evaluation infrastructure**: Ability to run headless tournaments between agents and analyze results.
+6. **Policy-Value Network** (`engine/policy_value_network.py`): A convolutional neural network that takes board state as input and outputs move probabilities and position evaluation.
+7. **Self-play training pipeline**: Generates training data through MCTS-guided self-play, trains the neural network, and iteratively improves both.
+8. **Statistics logger** (`logger/stats_logger.py`): CSV-based logging of local and global game outcomes.
+9. **Test and evaluation infrastructure**: Ability to run headless tournaments between agents and analyze results.
 
 ### 2.3 Project Goals
 
@@ -119,9 +122,9 @@ After implementation, the system will have:
 
 | ID | Title | Description | Priority | Source | Dependencies | Status |
 |----|-------|-------------|----------|--------|--------------|--------|
-| FR-001 | UTTT Game State Engine | A standalone UTTTState class encapsulating all game logic for simulation | Must | Assignment PRD, Architecture design | None | Draft |
-| FR-002 | MCTS Algorithm Implementation | Standard UCT-based MCTS with configurable iterations and exploration constant | Must | Assignment PRD §"Complexity" | FR-001 | Draft |
-| FR-003 | Pure MCTS Agent | Agent that uses FR-001+FR-002 to make decisions via BaseUTTTAgent interface | Must | Assignment PRD, Phase 1 goal | FR-001, FR-002 | Draft |
+| FR-001 | UTTT Game State Engine | A standalone UTTTState class wrapping shared game_rules for simulation | Must | Assignment PRD, Architecture design | engine/game_rules.py | Implemented |
+| FR-002 | MCTS Algorithm Implementation | Standard UCT-based MCTS with configurable iterations, exploration constant, and random seed | Must | Assignment PRD §"Complexity" | FR-001 | Implemented |
+| FR-003 | Pure MCTS Agent | Agent that uses FR-001+FR-002 to make decisions via BaseUTTTAgent interface | Must | Assignment PRD, Phase 1 goal | FR-001, FR-002 | Implemented |
 | FR-004 | Heuristic Evaluation Functions | Weighted board-state evaluation for UTTT positions | Must | Phase 2 goal, Research literature | FR-001 | Draft |
 | FR-005 | Heuristic-Guided Rollouts | Non-random playout simulation using heuristic-biased move selection and early cutoff | Must | Phase 2 goal | FR-004 | Draft |
 | FR-006 | MCTS + Heuristics Agent | Agent combining MCTS with heuristic rollouts and leaf evaluation | Must | Phase 2 goal, Assignment PRD | FR-001, FR-002, FR-004, FR-005 | Draft |
@@ -135,36 +138,38 @@ After implementation, the system will have:
 
 ### FR-001: UTTT Game State Engine
 
-**Description**: The system shall provide a standalone `UTTTState` class in `engine/game_state.py` that encapsulates all Ultimate Tic-Tac-Toe game logic for simulation purposes. This class must be independent of the WebSocket server and designed for rapid state cloning during MCTS tree search.
+**Description**: The system shall provide a standalone `UTTTState` class in `engine/game_state.py` that encapsulates all Ultimate Tic-Tac-Toe game logic for simulation purposes. This class wraps the shared pure functions from `engine/game_rules.py` (extracted from `backend/server.py`) in an immutable state object, and is designed for rapid state cloning during MCTS tree search.
 
 **Priority**: Must
 
 **Source**: Assignment PRD, Architecture design derived from `backend/server.py`
 
-**Dependencies**: None
+**Dependencies**: `engine/game_rules.py` (shared stateless game rules)
 
 **Acceptance Criteria**:
-- [ ] `UTTTState` can be initialized empty (no moves played) or from an existing state (copy constructor / `clone()` method)
-- [ ] `get_valid_actions()` returns all legal `[x, y]` moves for the current player, correctly handling:
+- [x] `UTTTState` can be initialized empty (no moves played) or from an existing state (copy constructor / `clone()` method)
+- [x] `get_valid_actions()` returns all legal `[x, y]` moves for the current player, correctly handling:
   - Active macro-board restriction (`active_macro` is set)
   - Free-move condition (`active_macro is None`) — all cells in unresolved macro-boards are allowed
   - Occupied cells are excluded
   - Resolved (won/drawn) macro-boards are excluded
-- [ ] `apply_action(x, y)` returns a **new** `UTTTState` instance (immutable pattern) with the move applied, board updated, local winner checked, macro-board updated, and next active macro determined
-- [ ] `is_terminal()` returns `True` when either player has won the macro-board or the macro-board is full with no winner (global draw)
-- [ ] `get_winner()` returns `0` (ongoing), `1` (Player 1 wins), `2` (Player 2 wins), or `3` (draw) matching the server's convention
-- [ ] Local micro-board wins are detected correctly (3-in-a-row within any of the nine 3x3 subgrids)
-- [ ] Local micro-board draws (full with no winner) are detected and marked with value `3`
-- [ ] Free-move condition is triggered correctly: when a move sends the opponent to a resolved macro-board, `active_macro` is set to `None`
-- [ ] Macro-board wins are detected correctly (3 resolved macro-boards in a row for the same player)
-- [ ] The engine correctly processes at least 3 complete realistic game scenarios (provided as sequence-of-move test cases) and produces identical outcomes to the server's `process_move()` logic
-- [ ] `UTTTState.__hash__` and `__eq__` are implemented for use as dictionary keys (for transposition tables if needed)
-- [ ] String representation (`__str__` or `__repr__`) provides a human-readable board display
-- [ ] All public methods have type annotations and docstrings
+- [x] `apply_action(x, y)` returns a **new** `UTTTState` instance (immutable pattern) with the move applied, board updated, local winner checked, macro-board updated, and next active macro determined
+- [x] `is_terminal()` returns `True` when either player has won the macro-board or the macro-board is full with no winner (global draw)
+- [x] `get_winner()` returns `0` (ongoing), `1` (Player 1 wins), `2` (Player 2 wins), or `3` (draw) matching the server's convention
+- [x] Local micro-board wins are detected correctly (3-in-a-row within any of the nine 3x3 subgrids)
+- [x] Local micro-board draws (full with no winner) are detected and marked with value `3`
+- [x] Free-move condition is triggered correctly: when a move sends the opponent to a resolved macro-board, `active_macro` is set to `None`
+- [x] Macro-board wins are detected correctly (3 resolved macro-boards in a row for the same player)
+- [x] The engine correctly processes at least 3 complete realistic game scenarios (provided as sequence-of-move test cases) and produces identical outcomes to the server's `process_move()` logic
+- [x] `UTTTState.__hash__` and `__eq__` are implemented for use as dictionary keys (for transposition tables if needed)
+- [x] String representation (`__str__` or `__repr__`) provides a human-readable board display
+- [x] All public methods have type annotations and docstrings
+
+**Status**: Implemented
 
 ### FR-002: MCTS Algorithm Implementation
 
-**Description**: The system shall provide a generic Monte Carlo Tree Search implementation in `engine/mcts_core.py` using the UCT (Upper Confidence bounds applied to Trees) algorithm. The implementation must be configurable and reusable across different game states that implement a standard interface.
+**Description**: The system shall provide a generic Monte Carlo Tree Search implementation in `engine/mcts_core.py` using the UCT (Upper Confidence bounds applied to Trees) algorithm. The implementation must be configurable and reusable across different game states that implement a standard interface. It uses a `GameStateProtocol` (Python `Protocol` class) for type-safe duck typing.
 
 **Priority**: Must
 
@@ -173,23 +178,25 @@ After implementation, the system will have:
 **Dependencies**: FR-001 (UTTTState)
 
 **Acceptance Criteria**:
-- [ ] The MCTS algorithm has four standard phases implemented correctly:
+- [x] The MCTS algorithm has four standard phases implemented correctly:
   - **Selection**: Traverses the tree from root using UCB1 formula: `score = Q(s,a) + C * sqrt(ln(N(s)) / N(s,a))` where `C` is the exploration constant (default `sqrt(2)` ≈ 1.414)
   - **Expansion**: When a non-terminal state is reached that has unvisited children, one or more child nodes are added
   - **Simulation (Playout)**: From the expanded node, random moves are played to game termination (or to a configurable depth limit)
   - **Backpropagation**: The playout result (win/loss/draw) is propagated up the tree, updating visit counts and win totals from the perspective of the player who made the move at each node
-- [ ] The number of MCTS iterations per search is configurable (default: 10,000)
-- [ ] The exploration constant `C` is configurable (default: `sqrt(2)`)
-- [ ] The algorithm returns the most-visited child action (not the highest-win-rate child) as the best move
-- [ ] Tree statistics are accessible: total iterations, tree node count, root visit count, best action visit count, best action win rate
-- [ ] A time limit (seconds) option exists as an alternative to iteration count for stopping search
-- [ ] The MCTS implementation is generic: it accepts any game state object that implements `get_valid_actions()`, `apply_action()`, `is_terminal()`, and `get_winner()`
-- [ ] Unit tests verify the algorithm produces deterministic results given the same random seed and configuration
-- [ ] Unit tests verify that increasing iteration count improves (or maintains) move quality (non-regression property)
+- [x] The number of MCTS iterations per search is configurable (default: 10,000)
+- [x] The exploration constant `C` is configurable (default: `sqrt(2)`)
+- [x] The algorithm returns the most-visited child action (not the highest-win-rate child) as the best move
+- [x] Tree statistics are accessible: total iterations, tree node count, root visit count, best action visit count, best action win rate
+- [x] A time limit (seconds) option exists as an alternative to iteration count for stopping search
+- [x] The MCTS implementation is generic: it uses a `GameStateProtocol` and accepts any game state object that implements `get_valid_actions()`, `apply_action()`, `is_terminal()`, and `get_winner()`
+- [x] Unit tests verify the algorithm produces deterministic results given the same random seed and configuration
+- [x] Unit tests verify that increasing iteration count improves (or maintains) move quality (non-regression property)
+
+**Status**: Implemented
 
 ### FR-003: Pure MCTS Agent
 
-**Description**: The system shall provide `MCTSAgent` in `agents/mcts_agent.py` that subclasses `BaseUTTTAgent` and uses the UTTTState engine (FR-001) and MCTS algorithm (FR-002) to make decisions.
+**Description**: The system shall provide `MCTSAgent` in `agents/mcts_agent.py` that subclasses `BaseUTTTAgent` and uses the UTTTState engine (FR-001) and MCTS algorithm (FR-002) to make decisions. Provides both a `deliberate()` method for server-based play and a `deliberate_from_state()` method for headless testing.
 
 **Priority**: Must
 
@@ -198,13 +205,15 @@ After implementation, the system will have:
 **Dependencies**: FR-001, FR-002
 
 **Acceptance Criteria**:
-- [ ] `MCTSAgent` subclasses `BaseUTTTAgent` and implements `deliberate(board, macro_board, active_macro, valid_actions)`
-- [ ] On `deliberate()`: constructs a `UTTTState` from the server state, runs MCTS for the configured number of iterations, returns the best `[x, y]` action
-- [ ] The agent is configurable with: `MCTS_ITERATIONS` (default: 10,000), `MCTS_C` (default: `sqrt(2)`), `MCTS_TIME_LIMIT` (default: `None`)
-- [ ] Supports logging of internal state per move: iteration count, tree size, best action, best action visit count, best action win rate, time taken
+- [x] `MCTSAgent` subclasses `BaseUTTTAgent` and implements `deliberate(board, macro_board, active_macro, valid_actions)`
+- [x] On `deliberate()`: constructs a `UTTTState` from the server state, runs MCTS for the configured number of iterations, returns the best `[x, y]` action
+- [x] The agent is configurable with: `mcts_iterations` (default: 10,000), `mcts_exploration_constant` (default: 1.414), `mcts_time_limit` (default: `None`), `random_seed` (default: `None`)
+- [x] Supports logging of internal state per move: iteration count, tree size, best action, best action visit count, best action win rate, time taken
 - [ ] The agent wins ≥90% of games against `DummyUTTTAgent` over 100 matches with MCTS iterations ≥ 10,000
-- [ ] The agent plays legally at all times (never returns an invalid action)
-- [ ] The agent handles edge cases gracefully: no valid actions returns `None`, empty board, fully resolved macro-boards
+- [x] The agent plays legally at all times (never returns an invalid action)
+- [x] The agent handles edge cases gracefully: no valid actions returns `None`, empty board, fully resolved macro-boards
+
+**Status**: Implemented
 
 ### FR-004: Heuristic Evaluation Functions
 
@@ -411,27 +420,31 @@ After implementation, the system will have:
 │  │ Frontend │◄──►│ Backend  │◄──►│     Agents           │  │
 │  │ (HTML5)  │    │ Server   │    │  ┌────────────────┐  │  │
 │  └──────────┘    │ (WebSock)│    │  │ Dummy Agent    │  │  │
-│                  └──────────┘    │  │ Manual Agent   │  │  │
-│                                  │  │ MCTS Agent*    │  │  │
-│                                  │  │ MCTS+Heur*     │  │  │
-│                                  │  │ AlphaZero*     │  │  │
-│                                  │  └────────────────┘  │  │
-│                                  └──────────────────────┘  │
-│                          ┌────────────────────┐            │
-│                          │   engine/          │ *New       │
-│                          │  game_state.py     │            │
-│                          │  mcts_core.py      │            │
-│                          │  heuristics.py     │            │
-│                          │  policy_value_net  │            │
-│                          └────────────────────┘            │
-│                          ┌────────────────────┐            │
-│                          │   logger/          │            │
-│                          │  stats_logger.py   │            │
-│                          └────────────────────┘            │
-│                          ┌────────────────────┐            │
-│                          │   tournament/       │            │
-│                          │  runner.py          │            │
-│                          └────────────────────┘            │
+│                  │    │     │    │  │ Manual Agent   │  │  │
+│                  │ ┌──┘     │    │  │ MCTS Agent*    │  │  │
+│                  │ │game_   │    │  │ MCTS+Heur*     │  │  │
+│                  │ │rules.py│    │  │ AlphaZero*     │  │  │
+│                  │ └────────┘    │  └────────────────┘  │  │
+│                  └──────┬───────┘         │              │
+│                         │                 │              │
+│                  ┌──────▼─────────────────▼──┐           │
+│                  │     engine/  *New          │           │
+│                  │  ┌────────────────────┐   │           │
+│                  │  │ game_rules.py ◄────┼───┼──Shared───│── Shared with server
+│                  │  │ game_state.py      │   │           │
+│                  │  │ mcts_core.py       │   │           │
+│                  │  │ heuristics.py      │   │           │
+│                  │  │ policy_value_net   │   │           │
+│                  │  └────────────────────┘   │           │
+│                  └───────────────────────────┘           │
+│                  ┌────────────────────┐                  │
+│                  │   logger/          │                  │
+│                  │  stats_logger.py   │                  │
+│                  └────────────────────┘                  │
+│                  ┌────────────────────┐                  │
+│                  │   tournament/      │                  │
+│                  │  runner.py         │                  │
+│                  └────────────────────┘                  │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -439,10 +452,11 @@ After implementation, the system will have:
 
 | Component              | Purpose                                                | Responsibilities                                          |
 |------------------------|--------------------------------------------------------|-----------------------------------------------------------|
-| `engine/game_state.py` | Standalone UTTT game engine for simulation              | Clone states, validate moves, detect wins/draws, manage turns |
-| `engine/mcts_core.py`  | Generic MCTS algorithm (UCT)                            | Tree selection, expansion, simulation, backpropagation    |
+| `engine/game_rules.py` | Shared stateless game rules                              | Pure functions for move validation, application, win/draw detection; used by both UTTTState and backend server |
+| `engine/game_state.py` | Immutable UTTT game state for simulation                 | Wraps game_rules in immutable state class: clone, validate moves, apply actions, detect wins/draws, manage turns |
+| `engine/mcts_core.py`  | Generic MCTS algorithm (UCT)                             | Tree selection (UCB1), expansion, random playout simulation, backpropagation; uses GameStateProtocol |
 | `engine/heuristics.py` | Heuristic evaluation functions (Phase 2)                 | Score board states, heuristic move selection, leaf evaluation |
-| `agents/mcts_agent.py` | Pure MCTS agent (Phase 1)                               | Connect to server, deliberate using MCTS, log statistics   |
+| `agents/mcts_agent.py` | Pure MCTS agent (Phase 1)                                | Connect to server, construct UTTTState from server state, deliberate using MCTS, log statistics; also supports headless testing via deliberate_from_state() |
 | `agents/mcts_heuristic_agent.py` | MCTS + Heuristics agent (Phase 2)            | Connect to server, deliberate using hybrid MCTS, log stats |
 | `engine/policy_value_network.py` | Policy-Value Network (Phase 3)                | CNN inference: board→(policy, value); forward pass for MCTS guidance |
 | `agents/alphazero_agent.py` | AlphaZero-lite agent (Phase 3)                      | Connect to server, deliberate using MCTS+NN, track inference time |
@@ -467,11 +481,12 @@ After implementation, the system will have:
 
 | Field      | Type                           | Required | Description                                 |
 |------------|--------------------------------|----------|---------------------------------------------|
+| `action_taken` | `Optional[List[int]]`          | No       | The action [x, y] that led to this node (None for root) |
 | `state`    | `UTTTState`                    | Yes      | Game state at this node                     |
 | `parent`   | `Optional[MCTSNode]`           | Yes      | Parent node (None for root)                 |
 | `children` | `List[MCTSNode]`               | Yes      | Child nodes                                 |
 | `visits`   | `int`                          | Yes      | Number of times this node was visited       |
-| `wins`     | `int`                          | Yes      | Number of wins from this node (from current player's perspective) |
+| `wins`     | `float`                        | Yes      | Number of wins from this node (from current player's perspective, supports 0.5 for draws) |
 | `untried_actions` | `List[List[int]]`       | Yes      | Legal actions not yet expanded              |
 
 ### 5.4 Key Interfaces
@@ -479,7 +494,22 @@ After implementation, the system will have:
 ```python
 # UTTTState - Game State Engine (FR-001)
 class UTTTState:
-    def __init__(self, board=None, macro_board=None, active_macro=None, current_player=1):
+    # Properties (return copies for immutability)
+    @property
+    def board(self) -> List[List[int]]: ...
+    @property
+    def macro_board(self) -> List[List[int]]: ...
+    @property
+    def active_macro(self) -> Optional[List[int]]: ...
+    @property
+    def current_player(self) -> int: ...
+    @property
+    def last_move(self) -> Optional[Tuple[int, int]]: ...
+    @property
+    def move_count(self) -> int: ...
+
+    def __init__(self, board=None, macro_board=None, active_macro=None,
+                 current_player=1, last_move=None, move_count=0):
     def clone(self) -> UTTTState:
     def get_valid_actions(self) -> List[List[int]]:
     def apply_action(self, x: int, y: int) -> UTTTState:
@@ -487,22 +517,40 @@ class UTTTState:
     def get_winner(self) -> int:
     def __hash__(self) -> int:
     def __eq__(self, other) -> bool:
+    def __str__(self) -> str:
+    def __repr__(self) -> str:
 
 # MCTS - Algorithm (FR-002)
 class MCTS:
-    def __init__(self, iterations=10000, exploration_constant=1.414, time_limit=None):
-    def search(self, state: UTTTState) -> List[int]:  # returns [x, y]
+    def __init__(self, iterations=10000, exploration_constant=1.414,
+                 time_limit=None, random_seed=None):
+    def search(self, state: GameStateProtocol) -> List[int]:  # returns [x, y]
     def get_stats(self) -> Dict[str, Any]:
 
-# Heuristic Evaluation (FR-004)
+# GameStateProtocol (duck-typed interface for MCTS compatibility)
+class GameStateProtocol(Protocol):
+    @property
+    def current_player(self) -> int: ...
+    def get_valid_actions(self) -> List[List[int]]: ...
+    def apply_action(self, x: int, y: int) -> Any: ...
+    def is_terminal(self) -> bool: ...
+    def get_winner(self) -> int: ...
+
+# MCTSAgent - Pure MCTS Agent (FR-003)
+class MCTSAgent(BaseUTTTAgent):
+    def __init__(self, server_uri="ws://localhost:8765",
+                 mcts_iterations=10000, mcts_exploration_constant=1.414,
+                 mcts_time_limit=None, random_seed=None):
+    async def deliberate(self, board, macro_board, active_macro,
+                         valid_actions) -> Optional[Union[List[int], Tuple[int, int]]]:
+    def deliberate_from_state(self, state: UTTTState) -> Optional[List[int]]:
+    def get_last_stats(self) -> Dict[str, Any]:
+
+# Heuristic Evaluation (FR-004) [Phase 2]
 class HeuristicEvaluator:
     def __init__(self, weights: Optional[Dict[str, float]] = None):
     def evaluate(self, state: UTTTState, player_id: int) -> float:
     def heuristic_playout(self, state: UTTTState, max_depth=50) -> int:
-
-# Agent Interface (existing, from BaseUTTTAgent)
-class BaseUTTTAgent:
-    async def deliberate(self, board, macro_board, active_macro, valid_actions) -> List[int]:
 ```
 
 ---
@@ -722,46 +770,51 @@ Board indexing: `board[y][x]` where `y` is row index and `x` is column index.
 | Leaf evaluation       | Heuristic score of a non-terminal state, used as playout result at depth limit |
 | Exploration constant C| Parameter balancing exploration vs exploitation in UCB1                  |
 
-### 10.2 Repository Structure (Planned)
+### 10.2 Repository Structure (Actual)
 
 ```
 project/
 ├── engine/
 │   ├── __init__.py
-│   ├── game_state.py         # FR-001: UTTTState class
-│   ├── mcts_core.py          # FR-002: MCTS algorithm
-│   ├── heuristics.py         # FR-004, FR-005: Heuristics
-│   └── policy_value_network.py  # FR-009: Policy-Value Network (Phase 3)
+│   ├── game_rules.py           # Shared stateless game rules (extracted from backend/server.py)
+│   ├── game_state.py           # FR-001: UTTTState class (wraps game_rules)
+│   ├── mcts_core.py            # FR-002: MCTS algorithm (UCT)
+│   ├── heuristics.py           # FR-004, FR-005: Heuristics (Phase 2 — planned)
+│   └── policy_value_network.py # FR-009: Policy-Value Network (Phase 3 — planned)
 ├── agents/
 │   ├── __init__.py
-│   ├── base_agent.py         # Existing
-│   ├── dummy_agent.py        # Existing
-│   ├── manual_agent.py       # Existing
-│   ├── mcts_agent.py         # FR-003: Pure MCTS agent
-│   ├── mcts_heuristic_agent.py  # FR-006: MCTS+Heuristic agent
-│   └── alphazero_agent.py    # FR-011: AlphaZero-lite agent
-├── selfplay/                  # FR-010: Self-play training pipeline (Phase 3)
+│   ├── base_agent.py           # Existing
+│   ├── dummy_agent.py          # Existing
+│   ├── manual_agent.py         # Existing
+│   ├── mcts_agent.py           # FR-003: Pure MCTS agent (Phase 1)
+│   ├── mcts_heuristic_agent.py # FR-006: MCTS+Heuristic agent (Phase 2 — planned)
+│   └── alphazero_agent.py      # FR-011: AlphaZero-lite agent (Phase 3 — planned)
+├── selfplay/                   # FR-010: Self-play training pipeline (Phase 3 — planned)
 │   ├── __init__.py
-│   ├── self_play.py           # Self-play game generation
-│   └── train.py               # Training loop
+│   ├── self_play.py            # Self-play game generation
+│   └── train.py                # Training loop
 ├── logger/
 │   ├── __init__.py
-│   └── stats_logger.py       # FR-007: CSV logger
+│   └── stats_logger.py         # FR-007: CSV logger (Phase 2 — planned)
 ├── tournament/
 │   ├── __init__.py
-│   └── runner.py             # FR-008: Tournament runner
-├── backend/                  # Existing (unchanged)
-├── frontend/                 # Existing (unchanged)
+│   └── runner.py               # FR-008: Tournament runner (Phase 2 — planned)
+├── backend/                    # Existing (unchanged)
+├── frontend/                   # Existing (unchanged)
 ├── docs/
 │   └── specs/
 │       └── functional-spec.md  # This file
 ├── tests/
-│   ├── test_game_state.py
-│   ├── test_mcts_core.py
-│   ├── test_heuristics.py
-│   ├── test_agents.py
-│   └── test_stats_logger.py
-├── stats/                    # CSV output directory
+│   ├── __init__.py
+│   ├── conftest.py
+│   ├── test_game_rules.py      # Tests for shared game_rules pure functions
+│   ├── test_game_state.py      # Tests for UTTTState (FR-001)
+│   ├── test_mcts_core.py       # Tests for MCTS algorithm (FR-002)
+│   ├── test_mcts_agent.py      # Tests for MCTSAgent (FR-003)
+│   ├── test_integration.py     # Integration tests (game_rules ↔ UTTTState ↔ MCTSAgent)
+│   ├── test_heuristics.py      # FR-004, FR-005 (Phase 2 — planned)
+│   └── test_stats_logger.py    # FR-007 (Phase 2 — planned)
+├── stats/                      # CSV output directory
 │   ├── local_games.csv
 │   └── global_games.csv
 ├── README.md
