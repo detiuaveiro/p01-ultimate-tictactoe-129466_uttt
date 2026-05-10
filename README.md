@@ -54,9 +54,9 @@ An agent responds with a move:
     ```
     Execute the agents:
     ```bash
-    python agents/dummy_agent.py
+    python -m agents.dummy_agent
     # and in another terminal
-    python agents/manual_agent.py
+    python -m agents.manual_agent
     ```
 
 ## Project Structure
