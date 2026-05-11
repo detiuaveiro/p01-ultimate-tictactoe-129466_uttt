@@ -334,15 +334,45 @@ def run_tournament(
                 )
                 for i in range(num_games)
             ]
-            for future in tqdm(
+            # Running win-rate counters (mapped to agent1/agent2 perspective)
+            _w1 = 0
+            _w2 = 0
+            _draws = 0
+
+            pbar = tqdm(
                 as_completed(futures),
                 total=num_games,
                 desc="Tournament",
                 unit="game",
                 disable=verbose,
-            ):
+            )
+            for future in pbar:
                 result = future.result()
                 results.append(result)
+
+                # Map P1/P2 result to agent1/agent2 using game parity
+                if result["game_idx"] % 2 == 0:
+                    # game_idx even: P1=agent1, P2=agent2
+                    if result["winner"] == 1:
+                        _w1 += 1
+                    elif result["winner"] == 2:
+                        _w2 += 1
+                    else:
+                        _draws += 1
+                else:
+                    # game_idx odd: P1=agent2, P2=agent1
+                    if result["winner"] == 1:
+                        _w2 += 1
+                    elif result["winner"] == 2:
+                        _w1 += 1
+                    else:
+                        _draws += 1
+
+                games_done = len(results)
+                pbar.set_description(
+                    f"{agent1_name} {_w1/games_done*100:.0f}% | "
+                    f"{agent2_name} {_w2/games_done*100:.0f}%"
+                )
 
     # --- Log all results ---
     for result in results:
