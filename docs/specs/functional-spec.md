@@ -1,11 +1,12 @@
 # Functional Specification: SI2 Ultimate Tic-Tac-Toe Autonomous Agents
 
-> **Version**: 0.3.0 | **Date**: 2026-05-10 | **Author**: Documenter Agent | **Status**: Active
+> **Version**: 0.4.0 | **Date**: 2026-05-11 | **Author**: Documenter Agent | **Status**: Active
 
 ## Change Log
 
 | Version | Date       | Author           | Changes                                                  |
 |---------|------------|------------------|----------------------------------------------------------|
+| 0.4.0   | 2026-05-11 | Documenter Agent | Implemented FR-007 (StatsLogger) and FR-008 (Tournament Runner); added tqdm progress bar, ProcessPoolExecutor parallel execution, CLI with --workers; simplified __init__.py files; recognized FR-005 MCTS agent argparse CLI; statuses updated to "Implemented" |
 | 0.3.0   | 2026-05-10 | Documenter Agent | Phase 1 implementation: extracted shared game_rules.py from server.py; UTTTState (FR-001), MCTS (FR-002), MCTSAgent (FR-003) implemented; statuses updated to "Implemented"; 66 tests added |
 | 0.2.0   | 2026-05-10 | Documenter Agent | Added AlphaZero-lite (Phase 3) requirements (FR-009, FR-010, FR-011); declared infrastructure immutability principle |
 | 0.1.0   | 2026-05-10 | Documenter Agent | Initial draft — all requirements defined, no implementation |
@@ -128,8 +129,8 @@ After implementation, the system will have:
 | FR-004 | Heuristic Evaluation Functions | Weighted board-state evaluation for UTTT positions | Must | Phase 2 goal, Research literature | FR-001 | Draft |
 | FR-005 | Heuristic-Guided Rollouts | Non-random playout simulation using heuristic-biased move selection and early cutoff | Must | Phase 2 goal | FR-004 | Draft |
 | FR-006 | MCTS + Heuristics Agent | Agent combining MCTS with heuristic rollouts and leaf evaluation | Must | Phase 2 goal, Assignment PRD | FR-001, FR-002, FR-004, FR-005 | Draft |
-| FR-007 | CSV Statistics Logger | Log local and global game outcomes to CSV files with timestamps | Should | Competition analysis need | None | Draft |
-| FR-008 | Agent Tournament Runner | Headless script to run multiple agent-vs-agent matches and aggregate results | Should | Testing requirement, Grading §"Repository" | FR-003, FR-006, FR-007 | Draft |
+| FR-007 | CSV Statistics Logger | Log local and global game outcomes to CSV files with timestamps; thread-safe via threading.Lock, ISO 8601 timestamps, headers on first write | Should | Competition analysis need | None | Implemented |
+| FR-008 | Agent Tournament Runner | Headless script to run multiple agent-vs-agent matches and aggregate results; uses ProcessPoolExecutor for parallel execution, tqdm for progress display, CLI with --workers/-w | Should | Testing requirement, Grading §"Repository" | FR-003, FR-006, FR-007 | Implemented |
 | FR-009 | Policy-Value Network | CNN that takes board state and outputs policy vector and value scalar for MCTS guidance | Could | Phase 3 goal, AlphaZero research | FR-001 | Draft |
 | FR-010 | Self-Play Training Pipeline | Self-play data generation and training pipeline for the Policy-Value Network | Could | Phase 3 goal | FR-009, FR-002 | Draft |
 | FR-011 | AlphaZero-lite Agent | MCTS agent guided by trained Policy-Value Network with NN-based leaf evaluation | Could | Phase 3 goal | FR-001, FR-002, FR-009, FR-010 | Draft |
@@ -196,7 +197,7 @@ After implementation, the system will have:
 
 ### FR-003: Pure MCTS Agent
 
-**Description**: The system shall provide `MCTSAgent` in `agents/mcts_agent.py` that subclasses `BaseUTTTAgent` and uses the UTTTState engine (FR-001) and MCTS algorithm (FR-002) to make decisions. Provides both a `deliberate()` method for server-based play and a `deliberate_from_state()` method for headless testing.
+**Description**: The system shall provide `MCTSAgent` in `agents/mcts_agent.py` that subclasses `BaseUTTTAgent` and uses the UTTTState engine (FR-001) and MCTS algorithm (FR-002) to make decisions. Provides both a `deliberate()` method for server-based play and a `deliberate_from_state()` method for headless testing. Supports CLI invocation via `python -m agents.mcts_agent` with `argparse` arguments: `--server-uri`, `--iterations`/`-i`, `--exploration-constant`/`-c`, `--time-limit`/`-t`, `--random-seed`/`-s`.
 
 **Priority**: Must
 
@@ -287,7 +288,7 @@ After implementation, the system will have:
 
 ### FR-007: CSV Statistics Logger
 
-**Description**: The system shall provide a statistics logging module in `logger/stats_logger.py` that records game outcomes to CSV files with timestamps for offline analysis.
+**Description**: The system shall provide a statistics logging module in `logger/stats_logger.py` that records game outcomes to CSV files with timestamps for offline analysis. The implementation uses `threading.Lock` for thread safety, ISO 8601 timestamps via `datetime(timezone.utc)`, headers-on-first-write logic, and graceful error handling (OSError caught and logged as warnings).
 
 **Priority**: Should
 
@@ -296,17 +297,17 @@ After implementation, the system will have:
 **Dependencies**: None
 
 **Acceptance Criteria**:
-- [ ] `StatsLogger(log_dir="stats/")` creates the log directory if it does not exist
-- [ ] `log_local_game(macro_pos, winner, moves_played)` appends a row to `stats/local_games.csv` with columns: `timestamp`, `macro_my`, `macro_mx`, `winner`, `moves_played`, `p1_agent`, `p2_agent`
-- [ ] `log_global_game(winner, total_moves, p1_name, p2_name, p1_config, p2_config)` appends a row to `stats/global_games.csv` with columns: `timestamp`, `winner`, `total_moves`, `p1_name`, `p2_name`, `p1_config`, `p2_config`, `round_number`
-- [ ] CSV files have headers on first write
-- [ ] Timestamps use ISO 8601 format
-- [ ] Thread-safe file writing (safe for concurrent use)
-- [ ] Unit tests verify CSV content matches logged data
+- [x] `StatsLogger(log_dir="stats/")` creates the log directory if it does not exist
+- [x] `log_local_game(macro_pos, winner, moves_played)` appends a row to `stats/local_games.csv` with columns: `timestamp`, `macro_my`, `macro_mx`, `winner`, `moves_played`, `p1_agent`, `p2_agent`
+- [x] `log_global_game(winner, total_moves, p1_name, p2_name, p1_config, p2_config)` appends a row to `stats/global_games.csv` with columns: `timestamp`, `winner`, `total_moves`, `p1_name`, `p2_name`, `p1_config`, `p2_config`, `round_number`
+- [x] CSV files have headers on first write
+- [x] Timestamps use ISO 8601 format
+- [x] Thread-safe file writing (safe for concurrent use)
+- [x] Unit tests verify CSV content matches logged data
 
 ### FR-008: Agent Tournament Runner
 
-**Description**: The system shall provide a command-line script or module that runs multiple headless matches between two agents and aggregates results for statistical analysis.
+**Description**: The system shall provide a command-line script or module that runs multiple headless matches between two agents and aggregates results for statistical analysis. The implementation uses `ProcessPoolExecutor` (from `concurrent.futures`) for parallel game execution, `tqdm` for progress display, and an `argparse` CLI with `--workers`/`-w` flags. Per-game seeds are derived deterministically from a base seed for reproducibility. Agent crashes and illegal moves are caught gracefully (opponent awarded the win).
 
 **Priority**: Should
 
@@ -315,13 +316,13 @@ After implementation, the system will have:
 **Dependencies**: FR-003, FR-006, FR-007
 
 **Acceptance Criteria**:
-- [ ] `run_tournament(agent1_class, agent2_class, num_games=100, ...)` runs the specified number of games between two agents
-- [ ] Alternates first-player between agents each round
-- [ ] Uses the existing server (or headless engine) to execute games
-- [ ] Records all outcomes using `StatsLogger` (FR-007)
-- [ ] Prints summary statistics after tournament: wins for each agent, draws, win rates
-- [ ] Supports command-line invocation: `python -m tournament --agent1 mcts --agent2 heuristic --games 100`
-- [ ] Handles agent crashes gracefully (logs error, continues to next game)
+- [x] `run_tournament(agent1_class, agent2_class, num_games=100, ...)` runs the specified number of games between two agents
+- [x] Alternates first-player between agents each round
+- [x] Uses the headless UTTTState engine (FR-001) to execute games (no server dependency)
+- [x] Records all outcomes using `StatsLogger` (FR-007)
+- [x] Prints summary statistics after tournament: wins for each agent, draws, win rates, average game length/time
+- [x] Supports command-line invocation: `python -m tournament.runner --agent1 mcts --agent2 dummy --games 100 --seed 42 -w 4`
+- [x] Handles agent crashes gracefully (logs error via tqdm.write, continues to next game)
 
 ---
 
@@ -461,8 +462,8 @@ After implementation, the system will have:
 | `engine/policy_value_network.py` | Policy-Value Network (Phase 3)                | CNN inference: board→(policy, value); forward pass for MCTS guidance |
 | `agents/alphazero_agent.py` | AlphaZero-lite agent (Phase 3)                      | Connect to server, deliberate using MCTS+NN, track inference time |
 | `selfplay/` | Self-play training pipeline (Phase 3)                              | Generate training data via MCTS-guided self-play; train network; save/load checkpoints |
-| `logger/stats_logger.py` | CSV logging of game outcomes                          | Append local/global game records to CSV files             |
-| `tournament/runner.py` | Headless match runner                                   | Orchestrate multiple games, aggregate statistics          |
+| `logger/stats_logger.py` | CSV logging of game outcomes (FR-007)                   | Append local/global game records to CSV files; thread-safe via threading.Lock; ISO 8601 timestamps; headers on first write |
+| `tournament/runner.py` | Headless match runner (FR-008)                          | Orchestrate multiple games via ProcessPoolExecutor; tqdm progress bar; aggregate statistics; CLI with --workers/-w |
 
 ### 5.3 Data Models
 
@@ -624,7 +625,8 @@ while not state.is_terminal():
 | `agents/mcts_heuristic_agent.py` | ≥80% | Same as above + heuristic configuration is used correctly |
 | `engine/policy_value_network.py` | ≥80% | Forward pass produces valid policy/value outputs, tensor shape correctness, inference speed <10ms |
 | `agents/alphazero_agent.py` | ≥80%      | Network-guided MCTS, legal move generation, inference time logging, config propagation |
-| `logger/stats_logger.py`  | ≥90%            | CSV file creation, record append, header writing, thread safety |
+| `logger/stats_logger.py`  | ≥90%            | CSV file creation, record append, header writing, thread safety, ISO 8601 timestamps |
+| `tournament/runner.py`    | ≥80%            | Full tournament run, parallel execution, crash handling, summary output |
 
 ### 7.2 Integration Tests
 
@@ -795,10 +797,10 @@ project/
 │   └── train.py                # Training loop
 ├── logger/
 │   ├── __init__.py
-│   └── stats_logger.py         # FR-007: CSV logger (Phase 2 — planned)
+│   └── stats_logger.py         # FR-007: CSV logger (thread-safe, ISO 8601, headers on first write)
 ├── tournament/
 │   ├── __init__.py
-│   └── runner.py               # FR-008: Tournament runner (Phase 2 — planned)
+│   └── runner.py               # FR-008: Tournament runner (ProcessPoolExecutor, tqdm, --workers CLI)
 ├── backend/                    # Existing (unchanged)
 ├── frontend/                   # Existing (unchanged)
 ├── docs/
@@ -813,7 +815,8 @@ project/
 │   ├── test_mcts_agent.py      # Tests for MCTSAgent (FR-003)
 │   ├── test_integration.py     # Integration tests (game_rules ↔ UTTTState ↔ MCTSAgent)
 │   ├── test_heuristics.py      # FR-004, FR-005 (Phase 2 — planned)
-│   └── test_stats_logger.py    # FR-007 (Phase 2 — planned)
+│   ├── test_stats_logger.py    # FR-007: StatsLogger tests (thread safety, CSV output)
+│   └── test_tournament_runner.py # FR-008: Tournament runner tests (full run, crash handling)
 ├── stats/                      # CSV output directory
 │   ├── local_games.csv
 │   └── global_games.csv
@@ -821,6 +824,8 @@ project/
 ├── requirements.txt
 └── compose.yml
 ```
+
+> **Package structure note**: `__init__.py` files are kept minimal (no eager imports) to avoid `RuntimeWarning` when running modules with `python -m`. Only `engine/__init__.py` re-exports key symbols (`apply_move`, `check_3x3_win`, `get_global_winner`, `get_valid_actions`, `is_3x3_full`, `UTTTState`, `MCTS`, `MCTSNode`) from its submodules for convenience; all other `__init__.py` files (`agents/`, `logger/`, `tournament/`) contain only a docstring comment.
 
 ---
 

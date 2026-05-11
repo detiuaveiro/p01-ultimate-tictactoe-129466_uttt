@@ -16,6 +16,23 @@ from tournament.runner import (
 )
 
 
+class CrashAgent(DummyUTTTAgent):
+    """Agent that always crashes on deliberation (module-level for pickle support)."""
+    call_count = 0
+
+    def deliberate_from_state(self, state: Any) -> Optional[List[int]]:
+        self.call_count += 1
+        if self.call_count >= 2:
+            raise RuntimeError("Intentional crash for testing")
+        return super().deliberate_from_state(state)
+
+
+class IllegalAgent(DummyUTTTAgent):
+    """Agent that returns an invalid action (module-level for pickle support)."""
+    def deliberate_from_state(self, state: Any) -> Optional[List[int]]:
+        return [-100, -100]  # definitely invalid
+
+
 class TestRunTournament:
     """Tests for the run_tournament function."""
 
@@ -42,7 +59,7 @@ class TestRunTournament:
                 "agent1_wins", "agent2_wins", "draws", "total_games",
                 "agent1_name", "agent2_name", "avg_game_length",
                 "avg_game_time", "max_game_time", "min_game_time",
-                "total_time"
+                "total_time",
             }
             assert set(results.keys()) == expected_keys
 
@@ -97,17 +114,6 @@ class TestRunTournament:
     def test_handles_agent_crash(self) -> None:
         """run_tournament handles agent crash gracefully."""
         with tempfile.TemporaryDirectory() as tmpdir:
-
-            class CrashAgent(DummyUTTTAgent):
-                """Agent that always crashes on deliberation."""
-                call_count = 0
-
-                def deliberate_from_state(self, state: Any) -> Optional[List[int]]:
-                    self.call_count += 1
-                    if self.call_count >= 2:
-                        raise RuntimeError("Intentional crash for testing")
-                    return super().deliberate_from_state(state)
-
             a1 = CrashAgent()
             a2 = DummyUTTTAgent()
             # Should not raise; crash should be caught
@@ -120,12 +126,6 @@ class TestRunTournament:
     def test_handles_illegal_move(self) -> None:
         """run_tournament handles illegal moves gracefully."""
         with tempfile.TemporaryDirectory() as tmpdir:
-
-            class IllegalAgent(DummyUTTTAgent):
-                """Agent that returns an invalid action."""
-                def deliberate_from_state(self, state: Any) -> Optional[List[int]]:
-                    return [-100, -100]  # definitely invalid
-
             a1 = IllegalAgent()
             a2 = DummyUTTTAgent()
             results = run_tournament(
@@ -185,7 +185,8 @@ class TestRunTournament:
             "avg_game_time": 1.23,
             "max_game_time": 5.67,
             "min_game_time": 0.01,
-            "total_time": 4.17
+            "total_time": 4.17,
+            "local_events": [],
         }
         print_summary(results)
         captured = capsys.readouterr()
@@ -254,7 +255,8 @@ class TestTournamentCLI:
             ])
 
     def test_cli_verbose(self) -> None:
-        """CLI with --verbose prints per-game output."""
+        """CLI with --verbose prints per-game output (from child process to terminal)
+        and tournament summary to stdout."""
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = os.path.join(tmpdir, "stats")
             import io
@@ -272,7 +274,10 @@ class TestTournamentCLI:
                     "--verbose",
                 ])
             output = f.getvalue()
-            assert "Game 1/2" in output
+            # Per-game "Game X/Y" output goes to child process stdout (terminal),
+            # not captured by parent's redirect_stdout. Verify what IS captured.
+            assert "Agent 1:" in output
+            assert "Agent 2:" in output
             assert "TOURNAMENT RESULTS" in output
 
     def test_cli_mcts_args(self) -> None:

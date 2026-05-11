@@ -12,6 +12,7 @@ import sys
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+from concurrent.futures import as_completed, ProcessPoolExecutor
 from tqdm import tqdm
 
 from agents.dummy_agent import DummyUTTTAgent
@@ -101,6 +102,159 @@ def _agent_display_name(agent: Any) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Single Game
+# ---------------------------------------------------------------------------
+
+
+def _play_single_game(
+    game_idx: int,
+    agent1: Any,
+    agent2: Any,
+    agent1_name: str,
+    agent2_name: str,
+    agent1_config: str,
+    agent2_config: str,
+    seed: Optional[int],
+    verbose: bool,
+    num_games: int = 0,
+) -> Dict[str, Any]:
+    """Play a single head-to-head game between two agents.
+
+    Each call is completely independent — creates fresh agent instances,
+    plays a full game, returns a result dict.  Does NOT perform any
+    I/O; local events are accumulated in a list that the caller logs.
+
+    Args:
+        num_games: Total number of games (for verbose display only).
+
+    Returns:
+        Dict with: game_idx, winner (1/2/3), game_length, game_time,
+        p1_label, p2_label, p1_config_str, p2_config_str, local_events
+    """
+    # --- Alternate first player ---
+    if game_idx % 2 == 0:
+        p1_proto, p2_proto = agent1, agent2
+        p1_label, p2_label = agent1_name, agent2_name
+        p1_config_str, p2_config_str = agent1_config, agent2_config
+    else:
+        p1_proto, p2_proto = agent2, agent1
+        p1_label, p2_label = agent2_name, agent1_name
+        p1_config_str, p2_config_str = agent2_config, agent1_config
+
+    # --- Derive per-game seeds ---
+    if seed is not None:
+        p1_seed = seed + game_idx * 2
+        p2_seed = seed + game_idx * 2 + 1
+    else:
+        p1_seed = None
+        p2_seed = None
+
+    # --- Create fresh agent instances ---
+    p1 = _create_agent_instance(p1_proto, p1_seed)
+    p2 = _create_agent_instance(p2_proto, p2_seed)
+
+    if verbose:
+        print(
+            f"Game {game_idx + 1}/{num_games}: "
+            f"{p1_label} (P1) vs {p2_label} (P2)"
+        )
+
+    # --- Play the game ---
+    game_start = time.monotonic()
+    state = UTTTState()
+    local_events: List[Dict[str, Any]] = []
+    prev_macro = [[0] * 3 for _ in range(3)]
+    local_games_seen: set = set()
+    game_length = 0
+    game_result: Optional[int] = None  # 1=P1 wins, 2=P2 wins, 3=draw
+    crash_or_illegal = False
+
+    while not state.is_terminal():
+        valid = state.get_valid_actions()
+        if not valid:
+            # No valid actions but state is not terminal → draw
+            game_result = 3
+            break
+
+        current_agent = p1 if state.current_player == 1 else p2
+
+        # --- Get action from agent ---
+        try:
+            action = current_agent.deliberate_from_state(state)
+        except Exception as exc:
+            msg = (
+                f"  Player {state.current_player} ({current_agent.__class__.__name__}) "
+                f"crashed: {exc}"
+            )
+            if verbose:
+                print(msg)
+            else:
+                tqdm.write(msg)
+            crash_or_illegal = True
+            game_result = 2 if state.current_player == 1 else 1  # opponent wins
+            break
+
+        # --- Validate action ---
+        if action is None or action not in valid:
+            msg = (
+                f"  Player {state.current_player} ({current_agent.__class__.__name__}) "
+                f"illegal move: {action}"
+            )
+            if verbose:
+                print(msg)
+            else:
+                tqdm.write(msg)
+            crash_or_illegal = True
+            game_result = 2 if state.current_player == 1 else 1  # opponent wins
+            break
+
+        # --- Apply move ---
+        state = state.apply_action(action[0], action[1])
+        game_length += 1
+
+        # --- Detect local macro-board completions ---
+        for my in range(3):
+            for mx in range(3):
+                new_val = state.macro_board[my][mx]
+                old_val = prev_macro[my][mx]
+                if new_val != 0 and old_val == 0 and (my, mx) not in local_games_seen:
+                    local_games_seen.add((my, mx))
+                    # Count occupied cells in this macro-board
+                    count = 0
+                    for by in range(my * 3, my * 3 + 3):
+                        for bx in range(mx * 3, mx * 3 + 3):
+                            if state.board[by][bx] != 0:
+                                count += 1
+                    local_events.append({
+                        "macro_pos": (my, mx),
+                        "winner": new_val,
+                        "moves_played": count,
+                        "p1_agent": p1_label,
+                        "p2_agent": p2_label,
+                    })
+
+        prev_macro = [row[:] for row in state.macro_board]
+
+    # --- Determine result if not already set ---
+    if not crash_or_illegal and game_result is None:
+        game_result = state.get_winner()
+
+    game_elapsed = time.monotonic() - game_start
+
+    return {
+        "game_idx": game_idx,
+        "winner": game_result if game_result is not None else 0,
+        "game_length": game_length,
+        "game_time": game_elapsed,
+        "p1_label": p1_label,
+        "p2_label": p2_label,
+        "p1_config_str": p1_config_str,
+        "p2_config_str": p2_config_str,
+        "local_events": local_events,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Tournament Runner
 # ---------------------------------------------------------------------------
 
@@ -112,6 +266,7 @@ def run_tournament(
     seed: Optional[int] = None,
     log_dir: str = "stats/",
     verbose: bool = False,
+    workers: int = 1,
 ) -> Dict[str, Any]:
     """Run a head-to-head tournament between two agents.
 
@@ -121,6 +276,10 @@ def run_tournament(
     logged to CSV via :class:`StatsLogger`.  Agent crashes and illegal
     moves are caught and result in a win for the opponent.
 
+    When *workers* > 1, games are executed in parallel using a
+    :class:`~concurrent.futures.ProcessPoolExecutor`.  Verbose mode forces
+    sequential execution regardless of *workers*.
+
     Args:
         agent1: First agent prototype instance.
         agent2: Second agent prototype instance.
@@ -129,6 +288,8 @@ def run_tournament(
             derived as ``seed + game_idx * 2 + player_offset``.
         log_dir: Directory for CSV statistics output (default ``stats/``).
         verbose: If True, print per-game progress to stdout.
+        workers: Number of parallel worker threads (default 1).  Set > 1
+            to enable parallel game execution.
 
     Returns:
         Dict with keys: ``agent1_wins``, ``agent2_wins``, ``draws``,
@@ -144,170 +305,81 @@ def run_tournament(
     agent1_config = _serialize_config(agent1)
     agent2_config = _serialize_config(agent2)
 
-    agent1_wins = 0
-    agent2_wins = 0
-    draws = 0
-    total_game_lengths: List[int] = []
-    total_game_times: List[float] = []
+    results: List[Dict[str, Any]] = []
 
-    # --- Build game iterator (tqdm when not verbose) ---
-    game_range = range(num_games)
-    if verbose or num_games == 0:
-        game_iter: Any = game_range
-    else:
-        game_iter = tqdm(game_range, desc="Tournament", unit="game")
+    tournament_start = time.monotonic()
 
-    for game_idx in game_iter:
-        # --- Alternate first player ---
-        if game_idx % 2 == 0:
-            p1_proto, p2_proto = agent1, agent2
-            p1_label, p2_label = agent1_name, agent2_name
-            p1_config_str, p2_config_str = agent1_config, agent2_config
-        else:
-            p1_proto, p2_proto = agent2, agent1
-            p1_label, p2_label = agent2_name, agent1_name
-            p1_config_str, p2_config_str = agent2_config, agent1_config
-
-        # --- Derive per-game seeds ---
-        if seed is not None:
-            p1_seed = seed + game_idx * 2
-            p2_seed = seed + game_idx * 2 + 1
-        else:
-            p1_seed = None
-            p2_seed = None
-
-        # --- Create fresh agent instances ---
-        p1 = _create_agent_instance(p1_proto, p1_seed)
-        p2 = _create_agent_instance(p2_proto, p2_seed)
-
-        if verbose:
+    if num_games > 0:
+        if verbose and workers > 1:
             print(
-                f"Game {game_idx + 1}/{num_games}: "
-                f"{p1_label} (P1) vs {p2_label} (P2)"
+                "Warning: verbose mode forces sequential execution (workers=1).",
+                file=sys.stderr,
             )
+            workers = 1
 
-        # --- Play the game ---
-        game_start = time.monotonic()
-        state = UTTTState()
-        prev_macro = [[0] * 3 for _ in range(3)]
-        local_games_seen: set = set()
-        game_length = 0
-        game_result: Optional[int] = None  # 1=P1 wins, 2=P2 wins, 3=draw
-        crash_or_illegal = False
-
-        while not state.is_terminal():
-            valid = state.get_valid_actions()
-            if not valid:
-                # No valid actions but state is not terminal → draw
-                game_result = 3
-                break
-
-            current_agent = p1 if state.current_player == 1 else p2
-
-            # --- Get action from agent ---
-            try:
-                action = current_agent.deliberate_from_state(state)
-            except Exception as exc:
-                msg = (
-                    f"  Player {state.current_player} ({current_agent.__class__.__name__}) "
-                    f"crashed: {exc}"
+        with ProcessPoolExecutor(max_workers=workers) as executor:
+            futures = [
+                executor.submit(
+                    _play_single_game,
+                    game_idx=i,
+                    agent1=agent1,
+                    agent2=agent2,
+                    agent1_name=agent1_name,
+                    agent2_name=agent2_name,
+                    agent1_config=agent1_config,
+                    agent2_config=agent2_config,
+                    seed=seed,
+                    verbose=verbose,
+                    num_games=num_games,
                 )
-                if verbose:
-                    print(msg)
-                else:
-                    tqdm.write(msg)
-                crash_or_illegal = True
-                game_result = 2 if state.current_player == 1 else 1  # opponent wins
-                break
+                for i in range(num_games)
+            ]
+            for future in tqdm(
+                as_completed(futures),
+                total=num_games,
+                desc="Tournament",
+                unit="game",
+                disable=verbose,
+            ):
+                result = future.result()
+                results.append(result)
 
-            # --- Validate action ---
-            if action is None or action not in valid:
-                msg = (
-                    f"  Player {state.current_player} ({current_agent.__class__.__name__}) "
-                    f"illegal move: {action}"
-                )
-                if verbose:
-                    print(msg)
-                else:
-                    tqdm.write(msg)
-                crash_or_illegal = True
-                game_result = 2 if state.current_player == 1 else 1  # opponent wins
-                break
-
-            # --- Apply move ---
-            state = state.apply_action(action[0], action[1])
-            game_length += 1
-
-            # --- Detect local macro-board completions ---
-            for my in range(3):
-                for mx in range(3):
-                    new_val = state.macro_board[my][mx]
-                    old_val = prev_macro[my][mx]
-                    if new_val != 0 and old_val == 0 and (my, mx) not in local_games_seen:
-                        local_games_seen.add((my, mx))
-                        # Count occupied cells in this macro-board
-                        count = 0
-                        for by in range(my * 3, my * 3 + 3):
-                            for bx in range(mx * 3, mx * 3 + 3):
-                                if state.board[by][bx] != 0:
-                                    count += 1
-                        logger.log_local_game(
-                            macro_pos=(my, mx),
-                            winner=new_val,
-                            moves_played=count,
-                            p1_agent=p1_label,
-                            p2_agent=p2_label,
-                        )
-
-            prev_macro = [row[:] for row in state.macro_board]
-
-        # --- Determine result if not already set ---
-        if not crash_or_illegal and game_result is None:
-            game_result = state.get_winner()
-
-        game_elapsed = time.monotonic() - game_start
-        total_game_times.append(game_elapsed)
-
-        # --- Update win/draw counters ---
-        # Map P1/P2 result to agent1/agent2
-        if game_idx % 2 == 0:
-            # agent1 = P1, agent2 = P2
-            if game_result == 1:
-                agent1_wins += 1
-            elif game_result == 2:
-                agent2_wins += 1
-            elif game_result == 3:
-                draws += 1
-        else:
-            # agent2 = P1, agent1 = P2
-            if game_result == 1:
-                agent2_wins += 1
-            elif game_result == 2:
-                agent1_wins += 1
-            elif game_result == 3:
-                draws += 1
-
-        total_game_lengths.append(game_length)
-
-        # --- Log global game ---
+    # --- Log all results ---
+    for result in results:
+        # Log local events
+        for event in result["local_events"]:
+            logger.log_local_game(
+                macro_pos=event["macro_pos"],
+                winner=event["winner"],
+                moves_played=event["moves_played"],
+                p1_agent=event["p1_agent"],
+                p2_agent=event["p2_agent"],
+            )
+        # Log global game
         logger.log_global_game(
-            winner=game_result if game_result is not None else 0,
-            total_moves=game_length,
-            p1_name=p1_label,
-            p2_name=p2_label,
-            p1_config=p1_config_str,
-            p2_config=p2_config_str,
-            round_number=game_idx + 1,
+            winner=result["winner"],
+            total_moves=result["game_length"],
+            p1_name=result["p1_label"],
+            p2_name=result["p2_label"],
+            p1_config=result["p1_config_str"],
+            p2_config=result["p2_config_str"],
+            round_number=result["game_idx"] + 1,
         )
 
-        # --- Update tqdm description with running win rates ---
-        if not verbose and num_games > 0:
-            games_done = game_idx + 1
-            w1_pct = agent1_wins / games_done * 100
-            w2_pct = agent2_wins / games_done * 100
-            game_iter.set_description(
-                f"{agent1_name} {w1_pct:.0f}% | {agent2_name} {w2_pct:.0f}%"
-            )
+    # --- Aggregate results ---
+    agent1_wins = sum(
+        1 for r in results
+        if (r["game_idx"] % 2 == 0 and r["winner"] == 1)
+        or (r["game_idx"] % 2 == 1 and r["winner"] == 2)
+    )
+    agent2_wins = sum(
+        1 for r in results
+        if (r["game_idx"] % 2 == 0 and r["winner"] == 2)
+        or (r["game_idx"] % 2 == 1 and r["winner"] == 1)
+    )
+    draws = sum(1 for r in results if r["winner"] == 3)
+    total_game_lengths = [r["game_length"] for r in results]
+    total_game_times = [r["game_time"] for r in results]
 
     avg_length = (
         sum(total_game_lengths) / len(total_game_lengths)
@@ -326,7 +398,7 @@ def run_tournament(
         "avg_game_time": sum(total_game_times) / len(total_game_times) if total_game_times else 0.0,
         "max_game_time": max(total_game_times) if total_game_times else 0.0,
         "min_game_time": min(total_game_times) if total_game_times else 0.0,
-        "total_time": sum(total_game_times) if total_game_times else 0.0,
+        "total_time": time.monotonic() - tournament_start,
     }
 
 
@@ -474,6 +546,13 @@ def _build_cli_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Print per-game progress",
     )
+    parser.add_argument(
+        "--workers",
+        "-w",
+        type=int,
+        default=1,
+        help="Number of parallel workers (default: 1; verbose mode forces 1)",
+    )
     return parser
 
 
@@ -489,11 +568,24 @@ def main(argv: Optional[List[str]] = None) -> None:
     agent1 = _resolve_agent(args.agent1, args)
     agent2 = _resolve_agent(args.agent2, args)
 
+    workers = args.workers
+    if args.verbose and args.workers > 1:
+        print(
+            "Warning: verbose mode forces sequential execution "
+            "(workers reset to 1).",
+            file=sys.stderr,
+        )
+        workers = 1
+
     if args.verbose:
         print(f"Agent 1: {args.agent1} ({type(agent1).__name__})")
         print(f"Agent 2: {args.agent2} ({type(agent2).__name__})")
         print(f"Games: {args.games}, Seed: {args.seed}")
+        if args.workers > 1:
+            print(f"Workers: {args.workers} (forced sequential due to -v)")
         print()
+    elif args.workers > 1:
+        print(f"Using {args.workers} parallel workers.")
 
     results = run_tournament(
         agent1=agent1,
@@ -502,6 +594,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         seed=args.seed,
         log_dir=args.log_dir,
         verbose=args.verbose,
+        workers=workers,
     )
 
     print_summary(results)
