@@ -9,7 +9,7 @@ import math
 import random
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Protocol, Tuple
+from typing import Any, Callable, Dict, List, Optional, Protocol, Tuple
 
 
 class GameStateProtocol(Protocol):
@@ -149,6 +149,7 @@ class MCTS:
         exploration_constant: float = 1.414,
         time_limit: Optional[float] = None,
         random_seed: Optional[int] = None,
+        playout_fn: Optional[Callable[[GameStateProtocol, random.Random], int]] = None,
     ) -> None:
         """
         Initializes the MCTS solver.
@@ -159,11 +160,16 @@ class MCTS:
             time_limit (Optional[float]): Time limit in seconds. If set,
                 this takes priority over iterations.
             random_seed (Optional[int]): Random seed for deterministic playouts.
+            playout_fn (Optional[Callable]): Optional function to replace the
+                random playout phase.  Receives the state and the MCTS internal
+                RNG, returns a winner (1, 2, or 3).  Default ``None`` uses
+                random playouts (existing behaviour).
         """
         self.iterations = iterations
         self.exploration_constant = exploration_constant
         self.time_limit = time_limit
         self.rng = random.Random(random_seed)
+        self.playout_fn = playout_fn
         self._total_iterations: int = 0
         self._tree_size: int = 0
         self._best_action: Optional[List[int]] = None
@@ -262,7 +268,11 @@ class MCTS:
 
     def _simulate(self, state: GameStateProtocol) -> int:
         """
-        Runs a random playout from the given state to a terminal state.
+        Runs a playout from the given state to a terminal state.
+
+        If a ``playout_fn`` was provided at construction, it is used instead
+        of the default random playout.  The playout function receives the
+        state and the MCTS internal RNG for reproducibility.
 
         Args:
             state: The game state to simulate from.
@@ -270,6 +280,10 @@ class MCTS:
         Returns:
             int: The winner (0=ongoing, 1=P1, 2=P2, 3=draw).
         """
+        if self.playout_fn is not None:
+            return self.playout_fn(state, self.rng)
+
+        # Default random playout (existing behaviour)
         current_state = state
         while not current_state.is_terminal():
             actions = current_state.get_valid_actions()

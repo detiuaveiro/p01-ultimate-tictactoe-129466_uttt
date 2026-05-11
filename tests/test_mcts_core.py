@@ -7,6 +7,9 @@ from typing import List
 
 import pytest
 
+import random
+from unittest.mock import Mock
+
 from engine.game_state import UTTTState
 from engine.mcts_core import MCTS, MCTSNode
 
@@ -230,3 +233,65 @@ class TestMCTS:
         assert "best_action_visits" in stats
         assert "best_action_win_rate" in stats
         assert stats["total_iterations"] > 0
+
+
+# ---------------------------------------------------------------------------
+# MCTS Playout Injection
+# ---------------------------------------------------------------------------
+
+
+class TestMCTSPlayoutInjection:
+    """Tests for MCTS playout_fn injection."""
+
+    def test_playout_fn_gets_called(self) -> None:
+        """When playout_fn is provided, _simulate calls it."""
+        mock_fn = Mock(return_value=3)
+        mcts = MCTS(iterations=10, random_seed=42, playout_fn=mock_fn)
+        # Use a board with multiple valid actions so MCTS actually runs iterations
+        board = [[0] * 9 for _ in range(9)]
+        board[0][0] = 1  # one cell occupied, rest empty
+        state = UTTTState(board=board, active_macro=[0, 0])
+        valid = state.get_valid_actions()
+        assert len(valid) > 1  # ensure MCTS won't short-circuit
+        mcts.search(state)
+        assert mock_fn.called, "playout_fn was not called"
+
+    def test_playout_fn_result_propagates(self) -> None:
+        """The result from playout_fn is used for backpropagation."""
+        mock_fn = Mock(return_value=1)
+        mcts = MCTS(iterations=10, random_seed=42, playout_fn=mock_fn)
+        # Board with 2 empty cells so MCTS actually runs
+        board = [[0] * 9 for _ in range(9)]
+        board[0][0] = 1  # one occupied
+        board[0][1] = 2  # two occupied
+        board[0][2] = 1  # three occupied — not a win (mix)
+        state = UTTTState(board=board, active_macro=[0, 0], current_player=1)
+        valid = state.get_valid_actions()
+        assert len(valid) > 1
+        mcts.search(state)
+        stats = mcts.get_stats()
+        # With all playouts returning P1 win (1), the best action should have
+        # a win rate of 1.0 (from P1's perspective, since P1 is current_player)
+        assert stats["best_action_win_rate"] == 1.0
+
+    def test_default_playout_fn_none(self) -> None:
+        """Default playout_fn=None uses existing random playout behaviour."""
+        mcts = MCTS(iterations=10, random_seed=42)
+        assert mcts.playout_fn is None
+
+    def test_playout_fn_receives_rng(self) -> None:
+        """playout_fn receives the MCTS internal RNG as second argument."""
+        mock_fn = Mock(return_value=3)
+        mcts = MCTS(iterations=5, random_seed=42, playout_fn=mock_fn)
+        board = [[0] * 9 for _ in range(9)]
+        board[0][0] = 1  # one occupied
+        state = UTTTState(board=board, active_macro=[0, 0])
+        valid = state.get_valid_actions()
+        assert len(valid) > 1
+        mcts.search(state)
+
+        # Check that playout_fn was called with (state, rng)
+        for call_args in mock_fn.call_args_list:
+            args, kwargs = call_args
+            assert len(args) == 2
+            assert isinstance(args[1], random.Random)

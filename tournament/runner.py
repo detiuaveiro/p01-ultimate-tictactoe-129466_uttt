@@ -17,6 +17,7 @@ from tqdm import tqdm
 
 from agents.dummy_agent import DummyUTTTAgent
 from agents.mcts_agent import MCTSAgent
+from agents.mcts_heuristic_agent import MCTSHeuristicAgent
 from engine.game_state import UTTTState
 from logger.stats_logger import StatsLogger
 
@@ -27,6 +28,10 @@ from logger.stats_logger import StatsLogger
 AGENT_REGISTRY: Dict[str, Dict[str, Any]] = {
     "dummy": {"class": DummyUTTTAgent, "display_name": "Dummy"},
     "mcts": {"class": MCTSAgent, "display_name": "MCTS"},
+    "mcts_heuristic": {
+        "class": MCTSHeuristicAgent,
+        "display_name": "MCTS+Heuristic",
+    },
 }
 
 # ---------------------------------------------------------------------------
@@ -52,6 +57,12 @@ def _serialize_config(agent: Any) -> str:
         config["mcts_time_limit"] = agent.mcts_time_limit
     if hasattr(agent, "random_seed"):
         config["random_seed"] = agent.random_seed
+    if hasattr(agent, "heuristic_playout_bias"):
+        config["heuristic_playout_bias"] = agent.heuristic_playout_bias
+    if hasattr(agent, "heuristic_max_depth"):
+        config["heuristic_max_depth"] = agent.heuristic_max_depth
+    if hasattr(agent, "heuristic_weights") and agent.heuristic_weights is not None:
+        config["heuristic_weights"] = agent.heuristic_weights
     return json.dumps(config)
 
 
@@ -75,6 +86,12 @@ def _create_agent_instance(prototype: Any, seed: Optional[int]) -> Any:
         kwargs["mcts_exploration_constant"] = prototype.mcts_exploration_constant
     if hasattr(prototype, "mcts_time_limit"):
         kwargs["mcts_time_limit"] = prototype.mcts_time_limit
+    if hasattr(prototype, "heuristic_playout_bias"):
+        kwargs["heuristic_playout_bias"] = prototype.heuristic_playout_bias
+    if hasattr(prototype, "heuristic_max_depth"):
+        kwargs["heuristic_max_depth"] = prototype.heuristic_max_depth
+    if hasattr(prototype, "heuristic_weights"):
+        kwargs["heuristic_weights"] = prototype.heuristic_weights
 
     return agent_class(**kwargs)
 
@@ -498,7 +515,7 @@ def _resolve_agent(name: str, args: argparse.Namespace) -> Any:
     agent_class = entry["class"]
     kwargs: Dict[str, Any] = {}
 
-    if agent_class is MCTSAgent:
+    if agent_class is MCTSAgent or agent_class is MCTSHeuristicAgent:
         if args.iterations is not None:
             kwargs["mcts_iterations"] = args.iterations
         if args.exploration_constant is not None:
@@ -506,6 +523,15 @@ def _resolve_agent(name: str, args: argparse.Namespace) -> Any:
         if args.time_limit is not None:
             kwargs["mcts_time_limit"] = args.time_limit
         kwargs["random_seed"] = args.seed
+
+    if agent_class is MCTSHeuristicAgent:
+        if args.playout_bias is not None:
+            kwargs["heuristic_playout_bias"] = args.playout_bias
+        if args.max_depth is not None:
+            kwargs["heuristic_max_depth"] = args.max_depth
+        if args.heuristic_weights is not None:
+            import json as _json
+            kwargs["heuristic_weights"] = _json.loads(args.heuristic_weights)
 
     return agent_class(**kwargs)
 
@@ -582,6 +608,29 @@ def _build_cli_parser() -> argparse.ArgumentParser:
         type=int,
         default=1,
         help="Number of parallel workers (default: 1; verbose mode forces 1)",
+    )
+    parser.add_argument(
+        "--playout-bias",
+        "-b",
+        type=float,
+        default=None,
+        help="Heuristic playout bias 0-1 (for mcts_heuristic agent)",
+    )
+    parser.add_argument(
+        "--max-depth",
+        "-d",
+        type=int,
+        default=None,
+        help="Heuristic playout max depth (for mcts_heuristic agent)",
+    )
+    parser.add_argument(
+        "--heuristic-weights",
+        type=str,
+        default=None,
+        help=(
+            "JSON string of heuristic weight overrides "
+            "(for mcts_heuristic agent, e.g. '{\"micro_win\": 150.0}')"
+        ),
     )
     return parser
 

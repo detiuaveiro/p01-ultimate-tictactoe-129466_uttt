@@ -2,7 +2,7 @@
 Engine package for Ultimate Tic-Tac-Toe.
 
 Provides shared game logic, immutable game state,
-and MCTS algorithm implementation.
+MCTS algorithm implementation, and heuristic evaluation.
 """
 
 from engine.game_rules import (
@@ -13,6 +13,7 @@ from engine.game_rules import (
     is_3x3_full,
 )
 from engine.game_state import UTTTState
+from engine.heuristics import HeuristicEvaluator
 from engine.mcts_core import MCTS, MCTSNode
 
 __all__ = [
@@ -22,6 +23,7 @@ __all__ = [
     "get_valid_actions",
     "is_3x3_full",
     "UTTTState",
+    "HeuristicEvaluator",
     "MCTS",
     "MCTSNode",
 ]

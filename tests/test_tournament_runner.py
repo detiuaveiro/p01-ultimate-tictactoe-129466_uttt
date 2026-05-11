@@ -7,8 +7,10 @@ import pytest
 
 from agents.dummy_agent import DummyUTTTAgent
 from agents.mcts_agent import MCTSAgent
+from agents.mcts_heuristic_agent import MCTSHeuristicAgent
 from tournament.runner import (
     AGENT_REGISTRY,
+    _create_agent_instance,
     _serialize_config,
     main,
     print_summary,
@@ -167,10 +169,74 @@ class TestRunTournament:
         """AGENT_REGISTRY contains expected entries with correct structure."""
         assert "dummy" in AGENT_REGISTRY
         assert "mcts" in AGENT_REGISTRY
+        assert "mcts_heuristic" in AGENT_REGISTRY
         assert AGENT_REGISTRY["dummy"]["class"] is DummyUTTTAgent
         assert AGENT_REGISTRY["mcts"]["class"] is MCTSAgent
+        assert AGENT_REGISTRY["mcts_heuristic"]["class"] is MCTSHeuristicAgent
         assert AGENT_REGISTRY["dummy"]["display_name"] == "Dummy"
         assert AGENT_REGISTRY["mcts"]["display_name"] == "MCTS"
+        assert AGENT_REGISTRY["mcts_heuristic"]["display_name"] == "MCTS+Heuristic"
+
+    def test_serialize_config_heuristic(self) -> None:
+        """_serialize_config includes heuristic fields for MCTSHeuristicAgent."""
+        agent = MCTSHeuristicAgent(
+            mcts_iterations=500,
+            mcts_exploration_constant=2.0,
+            random_seed=42,
+            heuristic_playout_bias=0.9,
+            heuristic_max_depth=30,
+            heuristic_weights={"micro_win": 150.0},
+        )
+        config_str = _serialize_config(agent)
+        import json
+        config = json.loads(config_str)
+        assert config["mcts_iterations"] == 500
+        assert config["mcts_exploration_constant"] == 2.0
+        assert config["random_seed"] == 42
+        assert config["heuristic_playout_bias"] == 0.9
+        assert config["heuristic_max_depth"] == 30
+        assert config["heuristic_weights"] == {"micro_win": 150.0}
+
+    def test_create_agent_instance_heuristic(self) -> None:
+        """_create_agent_instance copies heuristic fields for MCTSHeuristicAgent."""
+        prototype = MCTSHeuristicAgent(
+            mcts_iterations=500,
+            mcts_exploration_constant=2.0,
+            random_seed=42,
+            heuristic_playout_bias=0.9,
+            heuristic_max_depth=30,
+            heuristic_weights={"micro_win": 150.0},
+        )
+        new_instance = _create_agent_instance(prototype, seed=99)
+        assert isinstance(new_instance, MCTSHeuristicAgent)
+        assert new_instance.mcts_iterations == 500
+        assert new_instance.mcts_exploration_constant == 2.0
+        assert new_instance.random_seed == 99  # overridden by seed arg
+        assert new_instance.heuristic_playout_bias == 0.9
+        assert new_instance.heuristic_max_depth == 30
+        assert new_instance.heuristic_weights == {"micro_win": 150.0}
+
+    def test_heuristic_agent_tournament_completes(self) -> None:
+        """Tournament with MCTSHeuristicAgent completes all games."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            a1 = MCTSHeuristicAgent(mcts_iterations=50, random_seed=42)
+            a2 = DummyUTTTAgent(random_seed=99)
+            results = run_tournament(
+                a1, a2, num_games=3, seed=42, log_dir=os.path.join(tmpdir, "stats"),
+            )
+            assert results["total_games"] == 3
+            assert results["agent1_wins"] + results["agent2_wins"] + results["draws"] == 3
+
+    def test_heuristic_agent_tournament_heuristic_vs_mcts(self) -> None:
+        """Tournament between MCTSHeuristicAgent and MCTSAgent completes."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            a1 = MCTSHeuristicAgent(mcts_iterations=50, random_seed=42)
+            a2 = MCTSAgent(mcts_iterations=50, random_seed=99)
+            results = run_tournament(
+                a1, a2, num_games=3, seed=42, log_dir=os.path.join(tmpdir, "stats"),
+            )
+            assert results["total_games"] == 3
+            assert results["agent1_wins"] + results["agent2_wins"] + results["draws"] == 3
 
     def test_print_summary(self, capsys: pytest.CaptureFixture) -> None:
         """print_summary prints formatted output without error."""
@@ -298,3 +364,32 @@ class TestTournamentCLI:
         """CLI exits with error for unknown agent."""
         with pytest.raises(SystemExit):
             main(["--agent1", "nonexistent"])
+
+    def test_cli_heuristic_args(self) -> None:
+        """CLI passes heuristic arguments correctly."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = os.path.join(tmpdir, "stats")
+            main([
+                "--agent1", "mcts_heuristic",
+                "--agent2", "dummy",
+                "--games", "1",
+                "--seed", "42",
+                "--iterations", "100",
+                "--playout-bias", "0.9",
+                "--max-depth", "30",
+                "--heuristic-weights", '{"micro_win": 150.0}',
+                "--log-dir", log_dir,
+            ])
+
+    def test_cli_heuristic_mcts_vs_heuristic(self) -> None:
+        """CLI runs mcts_heuristic vs mcts without error."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = os.path.join(tmpdir, "stats")
+            main([
+                "--agent1", "mcts_heuristic",
+                "--agent2", "mcts",
+                "--games", "2",
+                "--seed", "42",
+                "--iterations", "50",
+                "--log-dir", log_dir,
+            ])
