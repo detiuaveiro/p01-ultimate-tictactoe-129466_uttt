@@ -1,11 +1,12 @@
 # Functional Specification: SI2 Ultimate Tic-Tac-Toe Autonomous Agents
 
-> **Version**: 0.4.0 | **Date**: 2026-05-11 | **Author**: Documenter Agent | **Status**: Active
+> **Version**: 0.4.1 | **Date**: 2026-05-11 | **Author**: Documenter Agent | **Status**: Active
 
 ## Change Log
 
 | Version | Date       | Author           | Changes                                                  |
 |---------|------------|------------------|----------------------------------------------------------|
+| 0.4.1   | 2026-05-10 | Documenter Agent | Documented running win rates in tournament tqdm bar |
 | 0.4.0   | 2026-05-11 | Documenter Agent | Implemented FR-007 (StatsLogger) and FR-008 (Tournament Runner); added tqdm progress bar, ProcessPoolExecutor parallel execution, CLI with --workers; simplified __init__.py files; recognized FR-005 MCTS agent argparse CLI; statuses updated to "Implemented" |
 | 0.3.0   | 2026-05-10 | Documenter Agent | Phase 1 implementation: extracted shared game_rules.py from server.py; UTTTState (FR-001), MCTS (FR-002), MCTSAgent (FR-003) implemented; statuses updated to "Implemented"; 66 tests added |
 | 0.2.0   | 2026-05-10 | Documenter Agent | Added AlphaZero-lite (Phase 3) requirements (FR-009, FR-010, FR-011); declared infrastructure immutability principle |
@@ -307,7 +308,7 @@ After implementation, the system will have:
 
 ### FR-008: Agent Tournament Runner
 
-**Description**: The system shall provide a command-line script or module that runs multiple headless matches between two agents and aggregates results for statistical analysis. The implementation uses `ProcessPoolExecutor` (from `concurrent.futures`) for parallel game execution, `tqdm` for progress display, and an `argparse` CLI with `--workers`/`-w` flags. Per-game seeds are derived deterministically from a base seed for reproducibility. Agent crashes and illegal moves are caught gracefully (opponent awarded the win).
+**Description**: The system shall provide a command-line script or module that runs multiple headless matches between two agents and aggregates results for statistical analysis. The implementation uses `ProcessPoolExecutor` (from `concurrent.futures`) for parallel game execution. The tqdm progress bar shows live-updating win rates for both agents as games complete, even in parallel mode (rates converge to the correct final values). It uses `tqdm` for progress display, and an `argparse` CLI with `--workers`/`-w` flags. Per-game seeds are derived deterministically from a base seed for reproducibility. Agent crashes and illegal moves are caught gracefully (opponent awarded the win).
 
 **Priority**: Should
 
@@ -800,7 +801,7 @@ project/
 │   └── stats_logger.py         # FR-007: CSV logger (thread-safe, ISO 8601, headers on first write)
 ├── tournament/
 │   ├── __init__.py
-│   └── runner.py               # FR-008: Tournament runner (ProcessPoolExecutor, tqdm, --workers CLI)
+│   └── runner.py               # FR-008: Tournament runner (ProcessPoolExecutor, tqdm with live win rates, --workers CLI)
 ├── backend/                    # Existing (unchanged)
 ├── frontend/                   # Existing (unchanged)
 ├── docs/
