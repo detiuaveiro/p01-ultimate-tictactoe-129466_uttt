@@ -9,7 +9,7 @@ import math
 import random
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Protocol, Tuple
+from typing import Any, Callable, Dict, List, Optional, Protocol, Tuple, cast
 
 
 class GameStateProtocol(Protocol):
@@ -47,6 +47,9 @@ class MCTSNode:
         "wins",
         "untried_actions",
         "action_taken",
+        "prior",
+        "is_expanded",
+        "_pending_priors",
     )
 
     def __init__(
@@ -54,6 +57,7 @@ class MCTSNode:
         state: GameStateProtocol,
         parent: Optional["MCTSNode"] = None,
         action_taken: Optional[List[int]] = None,
+        prior: float = 0.0,
     ) -> None:
         """
         Initializes an MCTSNode.
@@ -62,6 +66,7 @@ class MCTSNode:
             state: The game state at this node.
             parent: The parent node, or None for the root.
             action_taken: The action [x, y] that led to this state, or None for root.
+            prior: The prior probability for this action (used in PUCT selection).
         """
         self.state = state
         self.parent = parent
@@ -70,6 +75,9 @@ class MCTSNode:
         self.wins: float = 0.0
         self.untried_actions: List[List[int]] = state.get_valid_actions()
         self.action_taken = action_taken
+        self.prior: float = prior
+        self.is_expanded: bool = False
+        self._pending_priors: Optional[Dict[Tuple[int, int], float]] = None
 
     @property
     def is_fully_expanded(self) -> bool:
@@ -150,6 +158,9 @@ class MCTS:
         time_limit: Optional[float] = None,
         random_seed: Optional[int] = None,
         playout_fn: Optional[Callable[[GameStateProtocol, random.Random], int]] = None,
+        prior_fn: Optional[Callable[[GameStateProtocol], Dict[Tuple[int, int], float]]] = None,
+        value_fn: Optional[Callable[[GameStateProtocol], float]] = None,
+        use_puct: bool = False,
     ) -> None:
         """
         Initializes the MCTS solver.
@@ -164,18 +175,31 @@ class MCTS:
                 random playout phase.  Receives the state and the MCTS internal
                 RNG, returns a winner (1, 2, or 3).  Default ``None`` uses
                 random playouts (existing behaviour).
+            prior_fn (Optional[Callable]): Optional function that takes a state
+                and returns a dict of action -> prior probability. Used in PUCT
+                selection to guide tree expansion.
+            value_fn (Optional[Callable]): Optional function that takes a state
+                and returns a value in [-1, 1] from the current player's
+                perspective. Used to replace random simulation when use_puct
+                is True.
+            use_puct (bool): Whether to use PUCT selection (AlphaZero-style)
+                instead of UCB1. Default False preserves existing UCB1 behaviour.
         """
         self.iterations = iterations
         self.exploration_constant = exploration_constant
         self.time_limit = time_limit
         self.rng = random.Random(random_seed)
         self.playout_fn = playout_fn
+        self.prior_fn = prior_fn
+        self.value_fn = value_fn
+        self.use_puct = use_puct
         self._total_iterations: int = 0
         self._tree_size: int = 0
         self._best_action: Optional[List[int]] = None
         self._best_action_visits: int = 0
         self._best_action_win_rate: float = 0.0
         self._last_stats: Dict[str, Any] = {}
+        self._last_root: Optional[MCTSNode] = None
 
     def search(self, state: GameStateProtocol) -> List[int]:
         """
@@ -218,6 +242,9 @@ class MCTS:
                 self._run_iteration(root)
                 self._total_iterations += 1
 
+        # Save root for visit distribution queries
+        self._last_root = root
+
         # Select the most visited child's action
         best_child, best_action = root.most_visited_child()
         self._tree_size = self._count_nodes(root)
@@ -240,6 +267,32 @@ class MCTS:
 
         return best_action
 
+    def _puct_score(self, child: MCTSNode) -> float:
+        """
+        Computes the PUCT score for a child node, used in AlphaZero-style
+        tree selection.  The formula is:
+
+            Q(s,a) + C_puct * P(s,a) * sqrt(N_parent) / (1 + N_child)
+
+        where Q(s,a) is the mean action value, P(s,a) is the prior
+        probability, and C_puct is the exploration constant.
+
+        Args:
+            child: The child MCTSNode to score.
+
+        Returns:
+            float: The PUCT score. Returns infinity for unvisited children.
+        """
+        if child.visits == 0:
+            return float("inf")
+        q_value = child.wins / child.visits
+        c_puct = self.exploration_constant
+        parent_visits = child.parent.visits if child.parent else 1
+        exploration = (
+            c_puct * child.prior * math.sqrt(parent_visits) / (1 + child.visits)
+        )
+        return q_value + exploration
+
     def _run_iteration(self, root: MCTSNode) -> None:
         """
         Runs one iteration of MCTS (SELECT, EXPAND, SIMULATE, BACKPROPAGATE).
@@ -247,16 +300,35 @@ class MCTS:
         Args:
             root: The root node of the search tree.
         """
-        # SELECT: traverse tree using UCB1 until non-terminal, non-fully-expanded node
+        # SELECT: traverse tree using UCB1 or PUCT until non-terminal,
+        # non-fully-expanded node
         node = root
         while not node.is_terminal_node and node.is_fully_expanded and node.children:
-            node = node.best_child(self.exploration_constant)
+            if self.use_puct:
+                node = max(node.children, key=lambda c: self._puct_score(c))
+            else:
+                node = node.best_child(self.exploration_constant)
 
         # EXPAND: if node is not terminal and has untried actions, expand one
         if not node.is_terminal_node and not node.is_fully_expanded:
+            # Call prior_fn if this node hasn't been expanded yet
+            if self.prior_fn is not None and not node.is_expanded:
+                node._pending_priors = self.prior_fn(node.state)
+                node.is_expanded = True
+
             action = node.untried_actions.pop()
             new_state = node.state.apply_action(action[0], action[1])
-            child = MCTSNode(new_state, parent=node, action_taken=action)
+
+            # Look up prior from pending_priors if available
+            prior = 0.0
+            if node._pending_priors is not None:
+                prior = node._pending_priors.get(
+                    cast(Tuple[int, int], tuple(action)), 0.0
+                )
+
+            child = MCTSNode(
+                new_state, parent=node, action_taken=action, prior=prior
+            )
             node.children.append(child)
             node = child
 
@@ -270,9 +342,12 @@ class MCTS:
         """
         Runs a playout from the given state to a terminal state.
 
-        If a ``playout_fn`` was provided at construction, it is used instead
-        of the default random playout.  The playout function receives the
-        state and the MCTS internal RNG for reproducibility.
+        If ``use_puct`` is True and a ``value_fn`` was provided at
+        construction, the value function is used to directly evaluate the
+        leaf state (no random playout).  Otherwise, if a ``playout_fn``
+        was provided, it is used instead of the default random playout.
+        The playout function receives the state and the MCTS internal RNG
+        for reproducibility.
 
         Args:
             state: The game state to simulate from.
@@ -280,6 +355,12 @@ class MCTS:
         Returns:
             int: The winner (0=ongoing, 1=P1, 2=P2, 3=draw).
         """
+        # AlphaZero-lite: value_fn directly evaluates the leaf node
+        if self.use_puct and self.value_fn is not None:
+            value = self.value_fn(state)
+            return self._value_to_winner(value, state)
+
+        # Custom playout function (e.g., heuristic-guided rollouts)
         if self.playout_fn is not None:
             return self.playout_fn(state, self.rng)
 
@@ -292,6 +373,29 @@ class MCTS:
             action = self.rng.choice(actions)
             current_state = current_state.apply_action(action[0], action[1])
         return current_state.get_winner()
+
+    @staticmethod
+    def _value_to_winner(value: float, state: GameStateProtocol) -> int:
+        """
+        Converts a neural network value output to a winner ID.
+
+        Values >= 0.5 are interpreted as a win for ``state.current_player``.
+        Values <= -0.5 are interpreted as a win for the opponent.
+        Values in between are interpreted as a draw.
+
+        Args:
+            value: The value output from the network (typically in [-1, 1]).
+            state: The game state (used to determine current_player).
+
+        Returns:
+            int: 1 (P1 wins), 2 (P2 wins), or 3 (draw).
+        """
+        if value >= 0.5:
+            return state.current_player
+        elif value <= -0.5:
+            return 3 - state.current_player
+        else:
+            return 3
 
     def _backpropagate(self, node: MCTSNode, winner: int) -> None:
         """
@@ -326,6 +430,24 @@ class MCTS:
                   best_action, best_action_visits, best_action_win_rate.
         """
         return dict(self._last_stats)
+
+    def get_root_visit_distribution(self) -> Dict[Tuple[int, int], float]:
+        """
+        Returns the visit counts for each child of the root node from the
+        most recent search.  This provides the search policy distribution
+        used in AlphaZero-style training.
+
+        Returns:
+            Dict[Tuple[int, int], float]: Mapping from ``(x, y)`` actions to
+            visit counts.  Returns an empty dict if no search has been run.
+        """
+        if self._last_root is None:
+            return {}
+        return {
+            cast(Tuple[int, int], tuple(c.action_taken)): float(c.visits)
+            for c in self._last_root.children
+            if c.action_taken is not None
+        }
 
     @staticmethod
     def _count_nodes(node: MCTSNode) -> int:

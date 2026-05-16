@@ -3,7 +3,7 @@ Tests for engine.mcts_core MCTS algorithm.
 """
 
 import math
-from typing import List
+from typing import Dict, List, Tuple
 
 import pytest
 
@@ -295,3 +295,327 @@ class TestMCTSPlayoutInjection:
             args, kwargs = call_args
             assert len(args) == 2
             assert isinstance(args[1], random.Random)
+
+
+# ---------------------------------------------------------------------------
+# MCTS PUCT / AlphaZero-lite modifications
+# ---------------------------------------------------------------------------
+
+
+class TestMCTSPUCT:
+    """Tests for MCTS PUCT selection, prior_fn, value_fn, and visit distribution."""
+
+    # -- _value_to_winner (T014) ------------------------------------------------
+
+    def test_value_to_winner_positive(self) -> None:
+        """_value_to_winner returns current_player for value >= 0.5."""
+        state = UTTTState(current_player=1)
+        assert MCTS._value_to_winner(0.5, state) == 1
+        assert MCTS._value_to_winner(0.8, state) == 1
+        assert MCTS._value_to_winner(1.0, state) == 1
+
+    def test_value_to_winner_negative(self) -> None:
+        """_value_to_winner returns opponent for value <= -0.5."""
+        state = UTTTState(current_player=1)
+        assert MCTS._value_to_winner(-0.5, state) == 2
+        assert MCTS._value_to_winner(-0.8, state) == 2
+        assert MCTS._value_to_winner(-1.0, state) == 2
+
+    def test_value_to_winner_draw(self) -> None:
+        """_value_to_winner returns 3 for values between -0.5 and 0.5."""
+        state = UTTTState(current_player=1)
+        assert MCTS._value_to_winner(0.0, state) == 3
+        assert MCTS._value_to_winner(0.3, state) == 3
+        assert MCTS._value_to_winner(-0.3, state) == 3
+
+    def test_value_to_winner_player2(self) -> None:
+        """_value_to_winner correctly handles P2 as current_player."""
+        state = UTTTState(current_player=2)
+        assert MCTS._value_to_winner(0.8, state) == 2
+        assert MCTS._value_to_winner(-0.8, state) == 1
+        assert MCTS._value_to_winner(0.0, state) == 3
+
+    # -- _puct_score (T012) ----------------------------------------------------
+
+    def test_puct_score_unvisited_infinity(self) -> None:
+        """_puct_score returns inf for unvisited children."""
+        parent = MCTSNode(UTTTState())
+        parent.visits = 10
+        child = MCTSNode(UTTTState(), parent=parent, prior=0.5)
+        child.visits = 0
+
+        mcts = MCTS()
+        assert mcts._puct_score(child) == float("inf")
+
+    def test_puct_score_formula(self) -> None:
+        """_puct_score computes the correct PUCT formula."""
+        parent = MCTSNode(UTTTState())
+        parent.visits = 100
+        child = MCTSNode(UTTTState(), parent=parent, prior=0.7)
+        child.visits = 10
+        child.wins = 5.0
+
+        mcts = MCTS(exploration_constant=1.414)
+        score = mcts._puct_score(child)
+
+        q_value = 5.0 / 10
+        c_puct = 1.414
+        exploration = c_puct * 0.7 * math.sqrt(100) / (1 + 10)
+        expected = q_value + exploration
+
+        assert math.isclose(score, expected)
+
+    def test_puct_selection_prefers_high_prior(self) -> None:
+        """PUCT score is higher for children with higher prior (all else equal)."""
+        parent = MCTSNode(UTTTState())
+        parent.visits = 100
+
+        high_prior = MCTSNode(UTTTState(), parent=parent, prior=0.9)
+        high_prior.visits = 10
+        high_prior.wins = 5.0
+
+        low_prior = MCTSNode(UTTTState(), parent=parent, prior=0.1)
+        low_prior.visits = 10
+        low_prior.wins = 5.0
+
+        mcts = MCTS()
+        assert mcts._puct_score(high_prior) > mcts._puct_score(low_prior)
+
+    def test_puct_no_parent_fallback(self) -> None:
+        """_puct_score handles child with no parent gracefully."""
+        child = MCTSNode(UTTTState(), parent=None, prior=0.5)
+        child.visits = 5
+        child.wins = 2.0
+
+        mcts = MCTS()
+        # Should not raise; parent_visits defaults to 1
+        score = mcts._puct_score(child)
+        assert math.isfinite(score)
+
+    # -- prior_fn during expansion (T013) --------------------------------------
+
+    def test_prior_fn_is_called_during_expansion(self) -> None:
+        """prior_fn is called during MCTS expansion."""
+        mock_prior_fn = Mock(return_value={(0, 0): 0.5, (4, 4): 0.5})
+        # Provide a value_fn so simulation uses NN evaluation instead of random
+        # playouts, keeping the test fast and deterministic.
+        mock_value_fn = Mock(return_value=0.0)
+
+        mcts = MCTS(
+            iterations=50,
+            random_seed=42,
+            use_puct=True,
+            prior_fn=mock_prior_fn,
+            value_fn=mock_value_fn,
+        )
+
+        state = UTTTState()
+        valid = state.get_valid_actions()
+        assert len(valid) > 1  # ensure MCTS won't short-circuit
+
+        mcts.search(state)
+        assert mock_prior_fn.called, "prior_fn was not called during expansion"
+
+    def test_prior_fn_priors_used_in_children(self) -> None:
+        """Prior values from prior_fn are assigned to child nodes."""
+        # Create a state with few valid actions to make testing easier
+        board = [[0] * 9 for _ in range(9)]
+        board[0][0] = 1  # one cell occupied
+        board[0][1] = 2  # another occupied
+        state = UTTTState(board=board, active_macro=[0, 0])
+        valid = state.get_valid_actions()
+        assert len(valid) > 1
+
+        # Return non-uniform priors
+        mock_prior_fn = Mock()
+        mock_prior_fn.side_effect = lambda s: {
+            tuple(a): 0.9 if a == valid[0] else 0.1 for a in valid
+        }
+        mock_value_fn = Mock(return_value=0.0)
+
+        mcts = MCTS(
+            iterations=100,
+            random_seed=42,
+            use_puct=True,
+            prior_fn=mock_prior_fn,
+            value_fn=mock_value_fn,
+        )
+        mcts.search(state)
+
+        # Check that at least some children have non-zero priors
+        if mcts._last_root is not None:
+            child_priors = [c.prior for c in mcts._last_root.children]
+            # At least one child should have a prior > 0
+            assert any(p > 0.0 for p in child_priors)
+
+    # -- value_fn during simulation (T014) -------------------------------------
+
+    def test_value_fn_replaces_simulation(self) -> None:
+        """value_fn replaces random simulation when use_puct is True."""
+        mock_value_fn = Mock(return_value=0.8)
+
+        mcts = MCTS(iterations=10, use_puct=True, value_fn=mock_value_fn)
+
+        state = UTTTState()
+        winner = mcts._simulate(state)
+
+        mock_value_fn.assert_called_once_with(state)
+        # value=0.8 >= 0.5, current_player=1 => winner=1
+        assert winner == 1
+
+    def test_value_fn_negative_replaces_simulation(self) -> None:
+        """value_fn returning negative value gives opponent win."""
+        state = UTTTState(current_player=1)
+        mock_value_fn = Mock(return_value=-0.8)
+
+        mcts = MCTS(iterations=10, use_puct=True, value_fn=mock_value_fn)
+        winner = mcts._simulate(state)
+
+        # value=-0.8 <= -0.5, current_player=1 => winner=2
+        assert winner == 2
+
+    def test_value_fn_draw_replaces_simulation(self) -> None:
+        """value_fn returning near-zero value gives draw."""
+        state = UTTTState(current_player=1)
+        mock_value_fn = Mock(return_value=0.0)
+
+        mcts = MCTS(iterations=10, use_puct=True, value_fn=mock_value_fn)
+        winner = mcts._simulate(state)
+
+        # value=0.0 in (-0.5, 0.5) => winner=3 (draw)
+        assert winner == 3
+
+    def test_value_fn_none_preserves_random_playout(self) -> None:
+        """When value_fn is None, random playout is used even if use_puct=True."""
+        mcts = MCTS(iterations=10, use_puct=True, value_fn=None)
+        state = UTTTState()
+        # Should not raise; falls through to random playout
+        winner = mcts._simulate(state)
+        assert winner in (0, 1, 2, 3)
+
+    def test_playout_fn_used_when_use_puct_false(self) -> None:
+        """playout_fn is used when use_puct=False and playout_fn is set."""
+        mock_playout_fn = Mock(return_value=2)
+        mock_value_fn = Mock(return_value=0.8)
+
+        mcts = MCTS(
+            iterations=10,
+            use_puct=False,
+            playout_fn=mock_playout_fn,
+            value_fn=mock_value_fn,
+        )
+        state = UTTTState()
+        winner = mcts._simulate(state)
+
+        # playout_fn should be called (use_puct=False, so value_fn is ignored)
+        mock_playout_fn.assert_called_once_with(state, mcts.rng)
+        mock_value_fn.assert_not_called()
+        assert winner == 2
+
+    # -- use_puct=False preserves UCB1 (T012) ----------------------------------
+
+    def test_use_puct_false_preserves_ucb1(self) -> None:
+        """With use_puct=False (default), UCB1 selection is used and search works."""
+        mcts = MCTS(iterations=50, random_seed=42, use_puct=False)
+        state = UTTTState()
+        valid = state.get_valid_actions()
+        assert len(valid) > 1
+
+        action = mcts.search(state)
+        assert action in valid
+
+        # Verify stats are populated normally
+        stats = mcts.get_stats()
+        assert stats["total_iterations"] > 0
+        assert stats["best_action_visits"] > 0
+
+    def test_puct_search_still_works(self) -> None:
+        """MCTS search with use_puct=True still finds a valid action."""
+        mock_value_fn = Mock(return_value=0.0)  # always draw
+        mcts = MCTS(
+            iterations=50,
+            random_seed=42,
+            use_puct=True,
+            value_fn=mock_value_fn,
+        )
+        state = UTTTState()
+        valid = state.get_valid_actions()
+        assert len(valid) > 1
+
+        action = mcts.search(state)
+        assert action in valid
+
+        # Verify value_fn was called (at least once per iteration)
+        assert mock_value_fn.called
+
+    # -- get_root_visit_distribution (T015) ------------------------------------
+
+    def test_get_root_visit_distribution(self) -> None:
+        """get_root_visit_distribution returns visit counts for root children."""
+        mcts = MCTS(iterations=100, random_seed=42)
+        state = UTTTState()
+        mcts.search(state)
+
+        dist = mcts.get_root_visit_distribution()
+
+        assert isinstance(dist, dict)
+        assert len(dist) > 0
+
+        for key, visits in dist.items():
+            assert isinstance(key, tuple)
+            assert len(key) == 2
+            assert isinstance(key[0], int)
+            assert isinstance(key[1], int)
+            assert isinstance(visits, (int, float))
+            assert visits > 0
+
+    def test_get_root_visit_distribution_before_search(self) -> None:
+        """get_root_visit_distribution returns empty dict before any search."""
+        mcts = MCTS(iterations=100)
+        dist = mcts.get_root_visit_distribution()
+        assert dist == {}
+
+    def test_get_root_visit_distribution_total(self) -> None:
+        """Sum of visit distribution equals total root visits."""
+        mcts = MCTS(iterations=100, random_seed=42)
+        state = UTTTState()
+        mcts.search(state)
+
+        stats = mcts.get_stats()
+        root_visits = stats["root_visits"]
+        dist = mcts.get_root_visit_distribution()
+
+        total_dist_visits = sum(dist.values())
+        assert total_dist_visits == root_visits
+
+    # -- MCTSNode new field defaults (T010) -----------------------------------
+
+    def test_mcts_node_prior_default(self) -> None:
+        """MCTSNode prior defaults to 0.0."""
+        node = MCTSNode(UTTTState())
+        assert node.prior == 0.0
+
+    def test_mcts_node_prior_custom(self) -> None:
+        """MCTSNode accepts custom prior value."""
+        node = MCTSNode(UTTTState(), prior=0.75)
+        assert node.prior == 0.75
+
+    def test_mcts_node_is_expanded_default(self) -> None:
+        """MCTSNode is_expanded defaults to False."""
+        node = MCTSNode(UTTTState())
+        assert node.is_expanded is False
+
+    def test_mcts_node_pending_priors_default(self) -> None:
+        """MCTSNode _pending_priors defaults to None."""
+        node = MCTSNode(UTTTState())
+        assert node._pending_priors is None
+
+    # -- MCTS new parameter defaults (T011) ------------------------------------
+
+    def test_mcts_puct_defaults(self) -> None:
+        """MCTS use_puct, prior_fn, value_fn default correctly."""
+        mcts = MCTS()
+        assert mcts.use_puct is False
+        assert mcts.prior_fn is None
+        assert mcts.value_fn is None
+        assert mcts._last_root is None

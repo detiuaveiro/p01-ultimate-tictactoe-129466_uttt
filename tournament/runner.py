@@ -32,6 +32,10 @@ AGENT_REGISTRY: Dict[str, Dict[str, Any]] = {
         "class": MCTSHeuristicAgent,
         "display_name": "MCTS+Heuristic",
     },
+    "alphazero": {
+        "class": None,  # Resolved lazily on first use
+        "display_name": "AlphaZero",
+    },
 }
 
 # ---------------------------------------------------------------------------
@@ -63,6 +67,10 @@ def _serialize_config(agent: Any) -> str:
         config["heuristic_max_depth"] = agent.heuristic_max_depth
     if hasattr(agent, "heuristic_weights") and agent.heuristic_weights is not None:
         config["heuristic_weights"] = agent.heuristic_weights
+    if hasattr(agent, "checkpoint_path"):
+        config["checkpoint_path"] = agent.checkpoint_path
+    if hasattr(agent, "temperature"):
+        config["temperature"] = agent.temperature
     return json.dumps(config)
 
 
@@ -92,6 +100,10 @@ def _create_agent_instance(prototype: Any, seed: Optional[int]) -> Any:
         kwargs["heuristic_max_depth"] = prototype.heuristic_max_depth
     if hasattr(prototype, "heuristic_weights"):
         kwargs["heuristic_weights"] = prototype.heuristic_weights
+    if hasattr(prototype, "checkpoint_path"):
+        kwargs["checkpoint_path"] = prototype.checkpoint_path
+    if hasattr(prototype, "temperature"):
+        kwargs["temperature"] = prototype.temperature
 
     return agent_class(**kwargs)
 
@@ -334,7 +346,8 @@ def run_tournament(
             )
             workers = 1
 
-        with ProcessPoolExecutor(max_workers=workers) as executor:
+        executor = ProcessPoolExecutor(max_workers=workers)
+        try:
             futures = [
                 executor.submit(
                     _play_single_game,
@@ -390,6 +403,29 @@ def run_tournament(
                     f"{agent1_name} {_w1/games_done*100:.0f}% | "
                     f"{agent2_name} {_w2/games_done*100:.0f}%"
                 )
+        except KeyboardInterrupt:
+            print("\nInterrupted by user. Shutting down...", file=sys.stderr)
+            # Cancel all pending futures and stop workers immediately
+            executor.shutdown(wait=False, cancel_futures=True)
+            # Force-kill any remaining worker processes
+            import multiprocessing, os, signal
+            for p in multiprocessing.active_children():
+                try:
+                    os.kill(p.pid, signal.SIGKILL)
+                except (ProcessLookupError, OSError):
+                    pass
+            pbar.close()
+            if results:
+                print(
+                    f"Completed {len(results)}/{num_games} games before interrupt.",
+                    file=sys.stderr,
+                )
+            else:
+                print("No games completed.", file=sys.stderr)
+            # Exit immediately instead of re-raising (avoids atexit cleanup hangs)
+            sys.exit(1)
+        finally:
+            executor.shutdown(wait=False)
 
     # --- Log all results ---
     for result in results:
@@ -512,6 +548,17 @@ def _resolve_agent(name: str, args: argparse.Namespace) -> Any:
         sys.exit(1)
 
     entry = AGENT_REGISTRY[name]
+
+    # Lazy import for alphazero (avoids torch/numpy dependency at module load)
+    if entry["class"] is None:
+        if name == "alphazero":
+            from agents.alphazero_agent import AlphaZeroUTTTAgent
+
+            entry["class"] = AlphaZeroUTTTAgent  # Cache for next use
+        else:
+            print(f"Agent {name!r} not properly initialized.", file=sys.stderr)
+            sys.exit(1)
+
     agent_class = entry["class"]
     kwargs: Dict[str, Any] = {}
 
@@ -532,6 +579,19 @@ def _resolve_agent(name: str, args: argparse.Namespace) -> Any:
         if args.heuristic_weights is not None:
             import json as _json
             kwargs["heuristic_weights"] = _json.loads(args.heuristic_weights)
+
+    if agent_class.__name__ == "AlphaZeroUTTTAgent":
+        if args.checkpoint_path is not None:
+            kwargs["checkpoint_path"] = args.checkpoint_path
+        else:
+            print(
+                "ERROR: --checkpoint-path/-p is required when using the alphazero agent.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        if args.temperature is not None:
+            kwargs["temperature"] = args.temperature
+        kwargs["random_seed"] = args.seed
 
     return agent_class(**kwargs)
 
@@ -630,6 +690,23 @@ def _build_cli_parser() -> argparse.ArgumentParser:
         help=(
             "JSON string of heuristic weight overrides "
             "(for mcts_heuristic agent, e.g. '{\"micro_win\": 150.0}')"
+        ),
+    )
+    parser.add_argument(
+        "--checkpoint-path",
+        "-p",
+        type=str,
+        default=None,
+        help="Path to network checkpoint (.pt file) for alphazero agent",
+    )
+    parser.add_argument(
+        "--temperature",
+        "--temp",
+        type=float,
+        default=None,
+        help=(
+            "Temperature for move selection (0=deterministic, "
+            ">0=stochastic; for alphazero agent, default: 0.0)"
         ),
     )
     return parser

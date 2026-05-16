@@ -23,6 +23,7 @@
           python
           pythonPackages.venvShellHook
           pkgs.stdenv.cc.cc.lib
+          pkgs.zlib
         ];
 
         postVenvCreation = ''
@@ -38,6 +39,7 @@
         postShellHook = ''
           unset PYTHONPATH
           unset SOURCE_DATE_EPOCH
+          export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath [ pkgs.stdenv.cc.cc.lib pkgs.zlib ]}:$LD_LIBRARY_PATH"
         '';
       };
     };
