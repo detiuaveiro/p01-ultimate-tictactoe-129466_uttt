@@ -30,11 +30,14 @@ class SelfPlayConfig:
             weight_decay parameter).
         network_channels: Number of convolutional channels in the residual tower.
         network_res_blocks: Number of residual blocks in the tower.
+        workers: Number of parallel workers for self-play game generation.
+            When set to 1 (default), games are generated sequentially.
+            When > 1, games are distributed across worker processes.
     """
 
     num_iterations: int = 10
     games_per_iteration: int = 100
-    mcts_iterations: int = 800
+    mcts_iterations: int = 100
     c_puct: float = 1.414
     temperature_schedule: List[Tuple[int, float]] = field(
         default_factory=lambda: [(0, 1.0), (10, 0.5), (20, 0.25)]
@@ -48,3 +51,4 @@ class SelfPlayConfig:
     l2_regularization: float = 0.0001
     network_channels: int = 160
     network_res_blocks: int = 10
+    workers: int = 1  # Parallel workers for self-play (1 = sequential)

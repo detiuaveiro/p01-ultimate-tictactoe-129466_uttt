@@ -10,13 +10,17 @@ Supports resuming from the latest checkpoint if interrupted.
 """
 
 import argparse
+import concurrent.futures
 import logging
 import os
 import random
+import signal
 import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import List, Optional, Tuple
 
 import torch
+from tqdm import tqdm
 
 from engine.policy_value_network import (
     PolicyValueNetwork,
@@ -139,6 +143,52 @@ def load_latest_checkpoint(
 
 
 # ---------------------------------------------------------------------------
+# Parallel worker
+# ---------------------------------------------------------------------------
+
+
+def _generate_games_worker(
+    checkpoint_path: str,
+    config_dict: dict,
+    device: str,
+    rng_seed: int,
+    num_games: int,
+    worker_index: int = 0,
+) -> List[TrainingExample]:
+    """Worker function for parallel self-play.
+
+    Each worker loads the network independently from a checkpoint,
+    plays *num_games* games, and returns the training examples.
+
+    This must be a module-level function for multiprocessing pickling.
+
+    Args:
+        checkpoint_path: Path to a saved ``.pt`` checkpoint file.
+        config_dict: Serialized ``SelfPlayConfig`` as a dictionary.
+        device: Device for network inference (``'cpu'`` or ``'cuda'``).
+        rng_seed: Seed for the local ``random.Random`` instance.
+        num_games: Number of self-play games to generate in this worker.
+        worker_index: Worker index for tqdm display positioning.
+
+    Returns:
+        A list of :class:`TrainingExample` instances.
+    """
+    from selfplay.self_play import generate_self_play_games
+    from selfplay.config import SelfPlayConfig
+    from engine.policy_value_network import load_network
+    import random
+
+    config = SelfPlayConfig(**config_dict)
+    config.games_per_iteration = num_games
+    network = load_network(checkpoint_path, device=device)
+    rng = random.Random(rng_seed)
+    return generate_self_play_games(
+        network=network, config=config, rng=rng, device=device,
+        worker_index=worker_index,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Pipeline runner
 # ---------------------------------------------------------------------------
 
@@ -147,6 +197,7 @@ def run_pipeline(
     config: Optional[SelfPlayConfig] = None,
     resume: bool = True,
     device: str = "cpu",
+    verbose: bool = False,
 ) -> None:
     """Run the self-play training loop.
 
@@ -163,9 +214,20 @@ def run_pipeline(
         resume: If ``True``, attempts to resume from the latest checkpoint.
         device: Device for network training and inference
             (``'cpu'`` or ``'cuda'``).
+        verbose: If ``True``, sets root logger to DEBUG level.
     """
+    if verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
+
     if config is None:
         config = SelfPlayConfig()
+
+    # Use spawn for multiprocessing (compatible with PyTorch; fork can deadlock)
+    import multiprocessing as _mp
+    try:
+        _mp.set_start_method('spawn', force=True)
+    except RuntimeError:
+        pass  # already set
 
     # ------------------------------------------------------------------
     # 1. Load or create network
@@ -202,20 +264,123 @@ def run_pipeline(
     # ------------------------------------------------------------------
     rng = random.Random(42)  # fixed seed for reproducibility
 
+    # Create shared executor once for all iterations (avoids tqdm lock issues)
+    executor: Optional[ProcessPoolExecutor] = None
+    if config.workers > 1:
+        from tqdm import tqdm as tqdm_class
+        mp_lock = tqdm_class.get_lock().mp_lock
+        tqdm_class.set_lock(mp_lock)  # Set parent's lock too (shared with workers)
+        executor = ProcessPoolExecutor(
+            max_workers=config.workers,
+            initializer=tqdm_class.set_lock,
+            initargs=(mp_lock,),
+        )
+
     for iteration in range(start_iteration, config.num_iterations):
         logger.info(
             f"Iteration {iteration + 1}/{config.num_iterations} "
             f"({config.games_per_iteration} games)"
         )
 
-        # a) Generate self-play games
-        logger.info("Generating self-play games...")
-        examples: List[TrainingExample] = generate_self_play_games(
-            network=network,
-            config=config,
-            rng=rng,
-            device=device,
+        # a) Generate self-play games (optionally in parallel)
+        logger.info(
+            f"Generating self-play games ({config.workers} worker(s))..."
         )
+
+        if config.workers <= 1:
+            # Sequential (original behavior)
+            examples: List[TrainingExample] = generate_self_play_games(
+                network=network,
+                config=config,
+                rng=rng,
+                device=device,
+            )
+        else:
+            # Parallel: save a temp checkpoint for workers to load
+            tmp_checkpoint = os.path.join(
+                config.checkpoint_dir,
+                f".worker_checkpoint_{iteration}.pt",
+            )
+            os.makedirs(config.checkpoint_dir, exist_ok=True)
+            torch.save(network.state_dict(), tmp_checkpoint)
+
+            # Split games across workers
+            total_games = config.games_per_iteration
+            games_per_worker = [total_games // config.workers] * config.workers
+            for i in range(total_games % config.workers):
+                games_per_worker[i] += 1
+
+            # Serialize config for workers
+            import dataclasses
+
+            config_dict = dataclasses.asdict(config)
+            config_dict.pop("workers")  # Workers pick workers internally
+
+            # Submit tasks to the shared executor
+            futures = []
+            for w_idx in range(config.workers):
+                seed = rng.randint(0, 2**31 - 1)
+                future = executor.submit(
+                    _generate_games_worker,
+                    tmp_checkpoint,
+                    config_dict,
+                    device,
+                    seed,
+                    games_per_worker[w_idx],
+                    w_idx,  # worker_index
+                )
+                futures.append(future)
+
+            # Parent "Games" bar at position 0 (batch updates as workers finish)
+            games_pbar = tqdm(
+                total=config.games_per_iteration,
+                desc=f"Iteration {iteration + 1}/{config.num_iterations} ({config.games_per_iteration} games)",
+                unit="game",
+                position=0,
+            )
+            try:
+                examples = []
+                for future in as_completed(futures):
+                    worker_examples = future.result()
+                    examples.extend(worker_examples)
+                    # Find how many games this worker did
+                    w_idx = next(
+                        i for i, f in enumerate(futures) if f is future
+                    )
+                    games_pbar.update(games_per_worker[w_idx])
+            except KeyboardInterrupt:
+                print(
+                    "\nInterrupted during self-play. Shutting down workers...",
+                    file=sys.stderr,
+                )
+                executor.shutdown(wait=False, cancel_futures=True)
+                # Force-kill any remaining worker processes
+                import multiprocessing as _mp
+                for p in _mp.active_children():
+                    try:
+                        os.kill(p.pid, signal.SIGKILL)
+                    except (ProcessLookupError, OSError):
+                        pass
+                # Clean up temp checkpoint
+                try:
+                    os.remove(tmp_checkpoint)
+                except OSError:
+                    pass
+                try:
+                    games_pbar.close()
+                except NameError:
+                    pass
+                print("Self-play interrupted.", file=sys.stderr, flush=True)
+                sys.exit(1)
+            finally:
+                games_pbar.close()
+
+            # Clean up temp checkpoint
+            try:
+                os.remove(tmp_checkpoint)
+            except OSError:
+                pass
+
         logger.info(f"Generated {len(examples)} training examples.")
 
         # b) Train network
@@ -239,6 +404,10 @@ def run_pipeline(
         )
 
     logger.info("Pipeline complete.")
+
+    # Shutdown the shared executor if it was created
+    if executor is not None:
+        executor.shutdown(wait=True)
 
 
 # ---------------------------------------------------------------------------
@@ -308,6 +477,19 @@ def main(argv: Optional[List[str]] = None) -> None:
         default="cpu",
         help="Device for training/inference (default: cpu).",
     )
+    parser.add_argument(
+        "--workers",
+        "-w",
+        type=int,
+        default=None,
+        help="Number of parallel workers for self-play (default: 1, sequential).",
+    )
+    parser.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        help="Enable verbose (DEBUG) logging.",
+    )
 
     args = parser.parse_args(argv)
 
@@ -326,11 +508,16 @@ def main(argv: Optional[List[str]] = None) -> None:
         config.epochs = args.epochs
     if args.learning_rate is not None:
         config.learning_rate = args.learning_rate
+    if args.workers is not None:
+        config.workers = args.workers
+    if args.verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
 
     run_pipeline(
         config=config,
         resume=not args.no_resume,
         device=args.device,
+        verbose=args.verbose,
     )
 
 

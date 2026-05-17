@@ -9,8 +9,9 @@ network to produce a batch of training examples from full self-play games.
 import logging
 import math
 import random
+from tqdm import tqdm
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 import numpy as np
 import torch
@@ -23,6 +24,8 @@ from selfplay.config import SelfPlayConfig
 
 logger = logging.getLogger(__name__)
 
+# Spinner animation frames for per-worker progress display
+_SPINNER_CHARS = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 # ---------------------------------------------------------------------------
 # TrainingExample
@@ -210,6 +213,7 @@ def generate_self_play_games(
     config: SelfPlayConfig,
     rng: random.Random,
     device: str = "cpu",
+    worker_index: int = 0,
 ) -> List[TrainingExample]:
     """Play a batch of self-play games using *network* to guide MCTS and
     collect training examples.
@@ -231,6 +235,10 @@ def generate_self_play_games(
         config: Self-play configuration.
         rng: Seeded ``random.Random`` instance for reproducibility.
         device: Device for network inference (``'cpu'`` or ``'cuda'``).
+        worker_index: Worker index for tqdm display positioning.
+            Worker i shows a move counter at terminal line (1 + i),
+            displaying "⠋ Worker N: Game X/Y: Z moves [elapsed, rate]".
+            Resets each game. Default 0.
 
     Returns:
         A list of :class:`TrainingExample` instances collected from all
@@ -242,6 +250,16 @@ def generate_self_play_games(
     for game_idx in range(config.games_per_iteration):
         game_examples: List[TrainingExample] = []
         state = UTTTState()
+
+        # Move counter with spinner, rate, and game progress
+        counter = tqdm(
+            total=float("inf"),
+            desc=f"Worker {worker_index} Game {game_idx + 1}/{config.games_per_iteration}",
+            bar_format="{desc}: {n_fmt} moves [{elapsed}, {rate_fmt}]",
+            unit="move",
+            position=1 + worker_index,
+            leave=False,
+        )
 
         while not state.is_terminal():
             valid = state.get_valid_actions()
@@ -278,6 +296,13 @@ def generate_self_play_games(
                 action = rng.choice(valid)
                 _record_example(game_examples, state, _uniform_policy(valid), 0.0)
                 state = state.apply_action(action[0], action[1])
+                # Update spinner + move count
+                spinner = _SPINNER_CHARS[int(counter.n) % len(_SPINNER_CHARS)]
+                counter.set_description_str(
+                    f"{spinner} Worker {worker_index} "
+                    f"Game {game_idx + 1}/{config.games_per_iteration}"
+                )
+                counter.update(1)
                 continue
 
             # Compute search policy from root visit distribution
@@ -295,16 +320,21 @@ def generate_self_play_games(
             # Apply action
             state = state.apply_action(action[0], action[1])
 
+            # Update spinner + move count
+            spinner = _SPINNER_CHARS[int(counter.n) % len(_SPINNER_CHARS)]
+            counter.set_description_str(
+                f"{spinner} Worker {worker_index} "
+                f"Game {game_idx + 1}/{config.games_per_iteration}"
+            )
+            counter.update(1)
+
+        counter.close()
+
         # Game finished: assign outcomes
         winner = state.get_winner()
         _assign_outcomes(game_examples, winner)
 
         examples.extend(game_examples)
-
-        if (game_idx + 1) % max(1, config.games_per_iteration // 10) == 0:
-            logger.info(
-                f"Self-play: {game_idx + 1}/{config.games_per_iteration} games"
-            )
 
     return examples
 

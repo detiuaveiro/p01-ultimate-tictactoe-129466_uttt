@@ -7,6 +7,9 @@ Definition/
 # Tournament logs
 stats/
 
+# Alphazero training
+checkpoints/
+
 .ruff*
 pyrightconfig.json
 .*hints
