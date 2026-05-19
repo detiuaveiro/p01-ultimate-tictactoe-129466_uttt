@@ -26,6 +26,8 @@
           pythonPackages.venvShellHook
           pkgs.stdenv.cc.cc.lib
           pkgs.zlib
+          pkgs.docker
+          pkgs.docker-compose
         ];
 
         postVenvCreation = ''

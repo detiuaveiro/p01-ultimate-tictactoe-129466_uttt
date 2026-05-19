@@ -36,7 +36,7 @@ class MCTSHeuristicAgent(BaseUTTTAgent):
     def __init__(
         self,
         server_uri: str = "ws://localhost:8765",
-        mcts_iterations: int = 10000,
+        mcts_iterations: int = 100,
         mcts_exploration_constant: float = 1.414,
         mcts_time_limit: Optional[float] = None,
         random_seed: Optional[int] = None,

@@ -8,6 +8,7 @@ crashes/illegal moves gracefully.
 import argparse
 import json
 import logging
+import multiprocessing as _mp
 import sys
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -18,6 +19,7 @@ from tqdm import tqdm
 from agents.dummy_agent import DummyUTTTAgent
 from agents.mcts_agent import MCTSAgent
 from agents.mcts_heuristic_agent import MCTSHeuristicAgent
+from utils.progress import WorkerGameBar, setup_mp_lock
 from engine.game_state import UTTTState
 from logger.stats_logger import StatsLogger
 
@@ -104,6 +106,8 @@ def _create_agent_instance(prototype: Any, seed: Optional[int]) -> Any:
         kwargs["checkpoint_path"] = prototype.checkpoint_path
     if hasattr(prototype, "temperature"):
         kwargs["temperature"] = prototype.temperature
+    if hasattr(prototype, "device"):
+        kwargs["device"] = prototype.device
 
     return agent_class(**kwargs)
 
@@ -146,6 +150,7 @@ def _play_single_game(
     seed: Optional[int],
     verbose: bool,
     num_games: int = 0,
+    progress_bar: Optional[WorkerGameBar] = None,
 ) -> Dict[str, Any]:
     """Play a single head-to-head game between two agents.
 
@@ -209,8 +214,18 @@ def _play_single_game(
 
         # --- Get action from agent ---
         try:
+            msg = f"Player {state.current_player} deliberating from state"
+            if verbose:
+                print(msg)
+
+            if progress_bar is not None:
+                progress_bar.set_status("searching...")
             action = current_agent.deliberate_from_state(state)
+            if progress_bar is not None:
+                progress_bar.set_status("")
         except Exception as exc:
+            if progress_bar is not None:
+                progress_bar.set_status("")
             msg = (
                 f"  Player {state.current_player} ({current_agent.__class__.__name__}) "
                 f"crashed: {exc}"
@@ -240,6 +255,8 @@ def _play_single_game(
         # --- Apply move ---
         state = state.apply_action(action[0], action[1])
         game_length += 1
+        if progress_bar is not None:
+            progress_bar.on_move()
 
         # --- Detect local macro-board completions ---
         for my in range(3):
@@ -281,6 +298,58 @@ def _play_single_game(
         "p2_config_str": p2_config_str,
         "local_events": local_events,
     }
+
+
+# ---------------------------------------------------------------------------
+# Parallel worker (batch games per worker)
+# ---------------------------------------------------------------------------
+
+
+def _play_tournament_games_worker(
+    game_indices: List[int],
+    agent1: Any,
+    agent2: Any,
+    agent1_name: str,
+    agent2_name: str,
+    agent1_config: str,
+    agent2_config: str,
+    seed: Optional[int],
+    num_games: int,
+    worker_index: int,
+) -> List[Dict[str, Any]]:
+    """Play a batch of tournament games assigned to one worker.
+
+    Each worker creates its own :class:`WorkerGameBar` for per-game and
+    per-move progress display, then delegates to :func:`_play_single_game`
+    for each individual game.
+
+    Returns:
+        A list of result dicts (one per game) in the same order as
+        *game_indices*.
+    """
+    bar = WorkerGameBar(
+        worker_index,
+        len(game_indices),
+    )
+    results: List[Dict[str, Any]] = []
+    for local_idx, game_idx in enumerate(game_indices):
+        bar.start_game(local_idx)
+        result = _play_single_game(
+            game_idx=game_idx,
+            agent1=agent1,
+            agent2=agent2,
+            agent1_name=agent1_name,
+            agent2_name=agent2_name,
+            agent1_config=agent1_config,
+            agent2_config=agent2_config,
+            seed=seed,
+            verbose=False,
+            num_games=num_games,
+            progress_bar=bar,
+        )
+        results.append(result)
+    bar.close()
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -346,12 +415,172 @@ def run_tournament(
             )
             workers = 1
 
-        executor = ProcessPoolExecutor(max_workers=workers)
-        try:
-            futures = [
-                executor.submit(
-                    _play_single_game,
-                    game_idx=i,
+        # Running win-rate counters (mapped to agent1/agent2 perspective)
+        _w1 = 0
+        _w2 = 0
+        _draws = 0
+
+        if workers > 1 and not verbose:
+            # --- Parallel with per-worker progress bars ---
+            mp_lock = setup_mp_lock()
+            executor = ProcessPoolExecutor(
+                max_workers=workers,
+                initializer=tqdm.set_lock,
+                initargs=(mp_lock,),
+            )
+            try:
+                games_per_worker = [num_games // workers] * workers
+                for i in range(num_games % workers):
+                    games_per_worker[i] += 1
+
+                futures = []
+                start = 0
+                for w_idx in range(workers):
+                    count = games_per_worker[w_idx]
+                    if count == 0:
+                        continue
+                    indices = list(range(start, start + count))
+                    start += count
+                    future = executor.submit(
+                        _play_tournament_games_worker,
+                        indices,
+                        agent1,
+                        agent2,
+                        agent1_name,
+                        agent2_name,
+                        agent1_config,
+                        agent2_config,
+                        seed,
+                        num_games,
+                        w_idx,
+                    )
+                    futures.append(future)
+
+                pbar = tqdm(total=num_games, desc="Tournament", unit="game")
+                for future in as_completed(futures):
+                    worker_results = future.result()
+                    results.extend(worker_results)
+                    for r in worker_results:
+                        if r["game_idx"] % 2 == 0:
+                            if r["winner"] == 1:
+                                _w1 += 1
+                            elif r["winner"] == 2:
+                                _w2 += 1
+                            else:
+                                _draws += 1
+                        else:
+                            if r["winner"] == 1:
+                                _w2 += 1
+                            elif r["winner"] == 2:
+                                _w1 += 1
+                            else:
+                                _draws += 1
+                    games_done = len(results)
+                    pbar.set_description(
+                        f"{agent1_name} {_w1/games_done*100:.0f}% | "
+                        f"{agent2_name} {_w2/games_done*100:.0f}%"
+                    )
+                    pbar.update(len(worker_results))
+            except KeyboardInterrupt:
+                print("\nInterrupted by user. Shutting down...", file=sys.stderr)
+                executor.shutdown(wait=False, cancel_futures=True)
+                import os, signal
+                for p in _mp.active_children():
+                    try:
+                        os.kill(p.pid, signal.SIGKILL)
+                    except (ProcessLookupError, OSError):
+                        pass
+                pbar.close()
+                if results:
+                    print(
+                        f"Completed {len(results)}/{num_games} games before interrupt.",
+                        file=sys.stderr,
+                    )
+                else:
+                    print("No games completed.", file=sys.stderr)
+                sys.exit(1)
+            finally:
+                executor.shutdown(wait=False)
+                pbar.close()
+        elif verbose:
+            # --- Verbose mode: one game per future with per-game print output ---
+            executor = ProcessPoolExecutor(max_workers=1)
+            try:
+                futures = [
+                    executor.submit(
+                        _play_single_game,
+                        game_idx=i,
+                        agent1=agent1,
+                        agent2=agent2,
+                        agent1_name=agent1_name,
+                        agent2_name=agent2_name,
+                        agent1_config=agent1_config,
+                        agent2_config=agent2_config,
+                        seed=seed,
+                        verbose=True,
+                        num_games=num_games,
+                    )
+                    for i in range(num_games)
+                ]
+
+                pbar = tqdm(
+                    as_completed(futures),
+                    total=num_games,
+                    desc="Tournament",
+                    unit="game",
+                    disable=True,
+                )
+                for future in pbar:
+                    result = future.result()
+                    results.append(result)
+
+                    if result["game_idx"] % 2 == 0:
+                        if result["winner"] == 1:
+                            _w1 += 1
+                        elif result["winner"] == 2:
+                            _w2 += 1
+                        else:
+                            _draws += 1
+                    else:
+                        if result["winner"] == 1:
+                            _w2 += 1
+                        elif result["winner"] == 2:
+                            _w1 += 1
+                        else:
+                            _draws += 1
+
+                    games_done = len(results)
+                    pbar.set_description(
+                        f"{agent1_name} {_w1/games_done*100:.0f}% | "
+                        f"{agent2_name} {_w2/games_done*100:.0f}%"
+                    )
+            except KeyboardInterrupt:
+                print("\nInterrupted by user. Shutting down...", file=sys.stderr)
+                executor.shutdown(wait=False, cancel_futures=True)
+                import os, signal
+                for p in _mp.active_children():
+                    try:
+                        os.kill(p.pid, signal.SIGKILL)
+                    except (ProcessLookupError, OSError):
+                        pass
+                pbar.close()
+                if results:
+                    print(
+                        f"Completed {len(results)}/{num_games} games before interrupt.",
+                        file=sys.stderr,
+                    )
+                else:
+                    print("No games completed.", file=sys.stderr)
+                sys.exit(1)
+            finally:
+                executor.shutdown(wait=False)
+        else:
+            # --- Sequential with per-game progress bar (in-process) ---
+            bar = WorkerGameBar(0, num_games)
+            for game_idx in range(num_games):
+                bar.start_game(game_idx)
+                result = _play_single_game(
+                    game_idx=game_idx,
                     agent1=agent1,
                     agent2=agent2,
                     agent1_name=agent1_name,
@@ -359,30 +588,13 @@ def run_tournament(
                     agent1_config=agent1_config,
                     agent2_config=agent2_config,
                     seed=seed,
-                    verbose=verbose,
+                    verbose=False,
                     num_games=num_games,
+                    progress_bar=bar,
                 )
-                for i in range(num_games)
-            ]
-            # Running win-rate counters (mapped to agent1/agent2 perspective)
-            _w1 = 0
-            _w2 = 0
-            _draws = 0
-
-            pbar = tqdm(
-                as_completed(futures),
-                total=num_games,
-                desc="Tournament",
-                unit="game",
-                disable=verbose,
-            )
-            for future in pbar:
-                result = future.result()
                 results.append(result)
 
-                # Map P1/P2 result to agent1/agent2 using game parity
                 if result["game_idx"] % 2 == 0:
-                    # game_idx even: P1=agent1, P2=agent2
                     if result["winner"] == 1:
                         _w1 += 1
                     elif result["winner"] == 2:
@@ -390,7 +602,6 @@ def run_tournament(
                     else:
                         _draws += 1
                 else:
-                    # game_idx odd: P1=agent2, P2=agent1
                     if result["winner"] == 1:
                         _w2 += 1
                     elif result["winner"] == 2:
@@ -399,33 +610,12 @@ def run_tournament(
                         _draws += 1
 
                 games_done = len(results)
-                pbar.set_description(
-                    f"{agent1_name} {_w1/games_done*100:.0f}% | "
-                    f"{agent2_name} {_w2/games_done*100:.0f}%"
+                tqdm.write(
+                    f"Game {games_done}/{num_games}: "
+                    f"{agent1_name} {_w1} - {agent2_name} {_w2} "
+                    f"- Draws {_draws}"
                 )
-        except KeyboardInterrupt:
-            print("\nInterrupted by user. Shutting down...", file=sys.stderr)
-            # Cancel all pending futures and stop workers immediately
-            executor.shutdown(wait=False, cancel_futures=True)
-            # Force-kill any remaining worker processes
-            import multiprocessing, os, signal
-            for p in multiprocessing.active_children():
-                try:
-                    os.kill(p.pid, signal.SIGKILL)
-                except (ProcessLookupError, OSError):
-                    pass
-            pbar.close()
-            if results:
-                print(
-                    f"Completed {len(results)}/{num_games} games before interrupt.",
-                    file=sys.stderr,
-                )
-            else:
-                print("No games completed.", file=sys.stderr)
-            # Exit immediately instead of re-raising (avoids atexit cleanup hangs)
-            sys.exit(1)
-        finally:
-            executor.shutdown(wait=False)
+            bar.close()
 
     # --- Log all results ---
     for result in results:
@@ -591,6 +781,7 @@ def _resolve_agent(name: str, args: argparse.Namespace) -> Any:
             sys.exit(1)
         if args.temperature is not None:
             kwargs["temperature"] = args.temperature
+        kwargs["device"] = args.device
         kwargs["random_seed"] = args.seed
 
     return agent_class(**kwargs)
@@ -709,6 +900,12 @@ def _build_cli_parser() -> argparse.ArgumentParser:
             ">0=stochastic; for alphazero agent, default: 0.0)"
         ),
     )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="cpu",
+        help="Device for NN inference (cpu or cuda, default: cpu).",
+    )
     return parser
 
 
@@ -720,6 +917,12 @@ def main(argv: Optional[List[str]] = None) -> None:
     """
     parser = _build_cli_parser()
     args = parser.parse_args(argv)
+
+    # Use spawn for multiprocessing (required for CUDA compat with ProcessPoolExecutor)
+    try:
+        _mp.set_start_method("spawn", force=True)
+    except RuntimeError:
+        pass
 
     agent1 = _resolve_agent(args.agent1, args)
     agent2 = _resolve_agent(args.agent2, args)

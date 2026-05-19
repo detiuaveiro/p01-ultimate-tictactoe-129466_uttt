@@ -30,6 +30,7 @@ from engine.policy_value_network import (
 from selfplay.config import SelfPlayConfig
 from selfplay.self_play import TrainingExample, generate_self_play_games
 from selfplay.train import train_network
+from utils.progress import setup_mp_lock
 
 logging.basicConfig(
     level=logging.INFO,
@@ -267,12 +268,10 @@ def run_pipeline(
     # Create shared executor once for all iterations (avoids tqdm lock issues)
     executor: Optional[ProcessPoolExecutor] = None
     if config.workers > 1:
-        from tqdm import tqdm as tqdm_class
-        mp_lock = tqdm_class.get_lock().mp_lock
-        tqdm_class.set_lock(mp_lock)  # Set parent's lock too (shared with workers)
+        mp_lock = setup_mp_lock()
         executor = ProcessPoolExecutor(
             max_workers=config.workers,
-            initializer=tqdm_class.set_lock,
+            initializer=tqdm.set_lock,
             initargs=(mp_lock,),
         )
 

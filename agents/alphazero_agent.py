@@ -61,6 +61,7 @@ class AlphaZeroUTTTAgent(BaseUTTTAgent):
         random_seed: Optional[int] = None,
         checkpoint_path: Optional[str] = None,
         temperature: float = 0.0,
+        device: str = "cpu",
     ) -> None:
         """
         Initializes the AlphaZeroUTTTAgent.
@@ -73,6 +74,7 @@ class AlphaZeroUTTTAgent(BaseUTTTAgent):
             random_seed: Random seed (optional).
             checkpoint_path: Path to the network ``.pt`` checkpoint.
             temperature: Temperature for move selection (0 = deterministic).
+            device: Device for network inference (``'cpu'`` or ``'cuda'``).
         """
         super().__init__(server_uri)
         self.mcts_iterations = mcts_iterations
@@ -81,6 +83,7 @@ class AlphaZeroUTTTAgent(BaseUTTTAgent):
         self.random_seed = random_seed
         self.checkpoint_path = checkpoint_path
         self.temperature = temperature
+        self.device = device
 
         # Lazy network init for pickling support
         self._network: Optional[PolicyValueNetwork] = None
@@ -94,7 +97,7 @@ class AlphaZeroUTTTAgent(BaseUTTTAgent):
         """Return the neural network, loading it lazily if needed.
 
         Returns:
-            The PolicyValueNetwork instance (in eval mode).
+            The PolicyValueNetwork instance (in eval mode) on ``self.device``.
 
         Raises:
             RuntimeError: If no checkpoint path was provided.
@@ -105,7 +108,7 @@ class AlphaZeroUTTTAgent(BaseUTTTAgent):
                     "No checkpoint path specified. "
                     "Provide checkpoint_path to load the network."
                 )
-            self._network = load_network(self.checkpoint_path)
+            self._network = load_network(self.checkpoint_path, device=self.device)
             self._network.eval()
         return self._network
 

@@ -214,6 +214,7 @@ class MCTS:
         Raises:
             RuntimeError: If there are no valid actions or the state is terminal.
         """
+        # print('MCTS searching')
         valid_actions = state.get_valid_actions()
         if not valid_actions:
             raise RuntimeError("No valid actions available.")
@@ -231,6 +232,7 @@ class MCTS:
         if self.time_limit is not None:
             # Time-limited search
             while True:
+                # print('Running iteration')
                 elapsed = time.monotonic() - start_time
                 if elapsed >= self.time_limit:
                     break
@@ -238,7 +240,8 @@ class MCTS:
                 self._total_iterations += 1
         else:
             # Iteration-limited search
-            for _ in range(self.iterations):
+            for i in range(self.iterations):
+                # print(f"Running iteration {i}/{self.iterations}")
                 self._run_iteration(root)
                 self._total_iterations += 1
 

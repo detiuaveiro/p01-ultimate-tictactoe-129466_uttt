@@ -5,8 +5,9 @@ WORKDIR /app
 # Install the required websocket library
 RUN pip install websockets
 
-# Copy the server script into the container
-COPY server.py .
+# Copy the server script and engine package into the container
+COPY backend/server.py .
+COPY engine/ ./engine/
 
 # Expose the websocket port
 EXPOSE 8765

@@ -1,7 +1,8 @@
 services:
   backend:
     build:
-      context: ./backend
+      context: .
+      dockerfile: backend/Dockerfile
     user: "${UID:-1000}:${GROUPS:-1000}"
     ports:
       - "8765:8765"
