@@ -177,7 +177,9 @@ All tournaments below were run headlessly with **800 MCTS iterations**, **50 gam
 
 ### 5.3 AlphaZero-lite Assessment
 
-The AlphaZero-lite infrastructure is **fully functional**: the CNN trains correctly, the self-play loop generates data, the arena gates network promotions, and the agent plays legal moves guided by the trained network. However, due to the computational cost of CPU-only neural network inference (~120 s per move at 800 MCTS iterations), large-scale tournament evaluation against the Phase 2 heuristic agent was not feasible within the project timeline. With the available compute budget, the trained network (15 self-play iterations) is **competitive with but does not yet consistently surpass** the Phase 2 MCTS+Heuristic agent. Further training on GPU or with significantly more iterations would be required to realize the full potential of the AlphaZero approach.
+The AlphaZero-lite infrastructure is **fully functional**: the CNN trains correctly, the self-play loop generates data, the arena gates network promotions, and the agent plays legal moves guided by the trained network. However, due to the computational cost of CPU-only neural network inference (~120 s per move at 800 MCTS iterations), large-scale tournament evaluation against the Phase 2 heuristic agent was not feasible within the project timeline.
+
+A minimal headless sample (3 games, 50 MCTS iterations each) was run to obtain a concrete datapoint; AlphaZero lost all 3 games (0–3). Caveats: (1) 50 iterations is far below the intended 800+ and gives the network almost no search depth; (2) the agent emitted repeated "Selected invalid action" warnings, indicating that the MCTS tree occasionally proposes illegal moves and falls back to the first legal action — a bug that was not debugged due to time constraints. Consequently, this sample reflects both insufficient search budget and a minor agent-level bug rather than the true strength of the trained network. Further training on GPU or with significantly more iterations would be required to realize the full potential of the AlphaZero approach.
 
 ---
 
