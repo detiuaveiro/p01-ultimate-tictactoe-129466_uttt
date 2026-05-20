@@ -37,10 +37,10 @@ class SelfPlayConfig:
 
     num_iterations: int = 30
     games_per_iteration: int = 100
-    mcts_iterations: int = 100
+    mcts_iterations: int = 400
     c_puct: float = 1.0
     temperature_schedule: List[Tuple[int, float]] = field(
-        default_factory=lambda: [(0, 1.0), (10, 0.5), (20, 0.25)]
+        default_factory=lambda: [(0, 1.0), (15, 1.0), (16, 0.0)]
     )
     dirichlet_alpha: float = 0.3
     dirichlet_epsilon: float = 0.25
@@ -52,3 +52,4 @@ class SelfPlayConfig:
     network_channels: int = 160
     network_res_blocks: int = 10
     workers: int = 1  # Parallel workers for self-play (1 = sequential)
+    augment_symmetries: bool = True  # Augment training data with D4 symmetries

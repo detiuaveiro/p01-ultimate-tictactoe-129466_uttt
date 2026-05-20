@@ -145,6 +145,21 @@ class MCTSNode:
         best = max(self.children, key=lambda child: child.visits)
         return best, best.action_taken  # type: ignore[return-value]
 
+    def detach_subtree(self) -> "MCTSNode":
+        """Detach this node from its parent for subtree reuse.
+
+        Removes this node from its parent's children list and clears the
+        parent reference so the subtree can be used as a new root.
+
+        Returns:
+            The detached node (self).
+        """
+        if self.parent is not None:
+            if self in self.parent.children:
+                self.parent.children.remove(self)
+            self.parent = None
+        return self
+
 
 class MCTS:
     """
@@ -201,12 +216,18 @@ class MCTS:
         self._last_stats: Dict[str, Any] = {}
         self._last_root: Optional[MCTSNode] = None
 
-    def search(self, state: GameStateProtocol) -> List[int]:
+    def search(
+        self, state: GameStateProtocol, reuse_root: Optional["MCTSNode"] = None
+    ) -> List[int]:
         """
         Runs the MCTS search from the given state.
 
         Args:
             state: The game state to search from.
+            reuse_root: An optional previously-computed subtree root to reuse.
+                The caller is responsible for ensuring ``reuse_root.state``
+                matches *state* (typically by detaching the chosen child from
+                a prior search).
 
         Returns:
             List[int]: The best action [x, y].
@@ -214,7 +235,6 @@ class MCTS:
         Raises:
             RuntimeError: If there are no valid actions or the state is terminal.
         """
-        # print('MCTS searching')
         valid_actions = state.get_valid_actions()
         if not valid_actions:
             raise RuntimeError("No valid actions available.")
@@ -235,7 +255,10 @@ class MCTS:
             self._last_root = None
             return valid_actions[0]
 
-        root = MCTSNode(state)
+        if reuse_root is not None:
+            root = reuse_root
+        else:
+            root = MCTSNode(state)
         self._total_iterations = 0
         start_time = time.monotonic()
 
@@ -350,9 +373,11 @@ class MCTS:
         # BACKPROPAGATE: propagate the result up the tree
         self._backpropagate(node, winner)
 
-    def _simulate(self, state: GameStateProtocol) -> int:
+    def _simulate(self, state: GameStateProtocol) -> float:
         """
-        Runs a playout from the given state to a terminal state.
+        Runs a playout from the given state to a terminal state and returns
+        the result as a continuous value in ``[-1, 1]`` from the perspective
+        of ``state.current_player``.
 
         If ``use_puct`` is True and a ``value_fn`` was provided at
         construction, the value function is used to directly evaluate the
@@ -365,73 +390,73 @@ class MCTS:
             state: The game state to simulate from.
 
         Returns:
-            int: The winner (0=ongoing, 1=P1, 2=P2, 3=draw).
+            float: A value in ``[-1, 1]`` from the current player's
+            perspective.  ``+1`` = win, ``0`` = draw, ``-1`` = loss.
         """
+        # Terminal state shortcut: return exact outcome
+        if state.is_terminal():
+            winner = state.get_winner()
+            if winner == 3:
+                return 0.0
+            elif winner == state.current_player:
+                return 1.0
+            else:
+                return -1.0
+
         # AlphaZero-lite: value_fn directly evaluates the leaf node
         if self.use_puct and self.value_fn is not None:
-            value = self.value_fn(state)
-            return self._value_to_winner(value, state)
+            return self.value_fn(state)
 
         # Custom playout function (e.g., heuristic-guided rollouts)
         if self.playout_fn is not None:
-            return self.playout_fn(state, self.rng)
-
-        # Default random playout (existing behaviour)
-        current_state = state
-        while not current_state.is_terminal():
-            actions = current_state.get_valid_actions()
-            if not actions:
-                break
-            action = self.rng.choice(actions)
-            current_state = current_state.apply_action(action[0], action[1])
-        return current_state.get_winner()
-
-    @staticmethod
-    def _value_to_winner(value: float, state: GameStateProtocol) -> int:
-        """
-        Converts a neural network value output to a winner ID.
-
-        Values >= 0.5 are interpreted as a win for ``state.current_player``.
-        Values <= -0.5 are interpreted as a win for the opponent.
-        Values in between are interpreted as a draw.
-
-        Args:
-            value: The value output from the network (typically in [-1, 1]).
-            state: The game state (used to determine current_player).
-
-        Returns:
-            int: 1 (P1 wins), 2 (P2 wins), or 3 (draw).
-        """
-        if value >= 0.5:
-            return state.current_player
-        elif value <= -0.5:
-            return 3 - state.current_player
+            winner = self.playout_fn(state, self.rng)
         else:
-            return 3
+            # Default random playout (existing behaviour)
+            current_state = state
+            while not current_state.is_terminal():
+                actions = current_state.get_valid_actions()
+                if not actions:
+                    break
+                action = self.rng.choice(actions)
+                current_state = current_state.apply_action(action[0], action[1])
+            winner = current_state.get_winner()
 
-    def _backpropagate(self, node: MCTSNode, winner: int) -> None:
+        # Convert winner to value from current player's perspective
+        if winner == 3:
+            return 0.0
+        elif winner == state.current_player:
+            return 1.0
+        else:
+            return -1.0
+
+    def _backpropagate(self, node: MCTSNode, value: float) -> None:
         """
         Propagates the simulation result up the tree.
 
-        The score is tracked from the perspective of the player who made the
-        move TO this node (i.e., the moving player).
+        The *value* is the leaf evaluation from the perspective of
+        ``node.state.current_player``.  As we move up the tree, the sign is
+        flipped at each level so that the value stored at each edge/node
+        reflects the perspective of the player who moved TO reach it.
+
+        This matches the standard AlphaZero approach where ``v`` from the
+        leaf is returned upward with ``return -v`` at each ply.
 
         Args:
             node: The leaf node to start backpropagation from.
-            winner: The winner of the simulation (1, 2, 3, or 0).
+            value: Leaf evaluation in ``[-1, 1]`` from the leaf state's
+                current-player perspective.
         """
         current = node
         while current is not None:
             current.visits += 1
             if current.parent is not None:
-                # current.state.current_player is the player to move NEXT.
-                # The move that led to this node was made by the OTHER player.
-                moving_player = 3 - current.state.current_player
-                if winner == 3:
-                    current.wins += 0.5
-                elif winner == moving_player:
-                    current.wins += 1.0
+                # The move that led to *current* was made by the OTHER player
+                # (3 - current.state.current_player).  *value* is from
+                # current.state.current_player perspective, so negate to get
+                # the moving player's perspective.
+                current.wins += -value
             current = current.parent
+            value = -value
 
     def get_stats(self) -> Dict[str, Any]:
         """

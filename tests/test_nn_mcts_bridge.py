@@ -398,3 +398,43 @@ class TestDirichletSample:
         rng = random.Random(42)
         sample = _dirichlet_sample(0.001, 81, rng)
         assert sample.sum() == pytest.approx(1.0, abs=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# Network caching
+# ---------------------------------------------------------------------------
+
+
+class TestNNEvaluatorCache:
+    """Tests that the internal evaluator caches network evaluations."""
+
+    def test_same_state_reuses_cache(self):
+        """Calling prior_fn then value_fn on the same state uses one forward pass."""
+        from unittest.mock import patch
+
+        network = _make_network()
+        prior_fn, value_fn = create_nn_mcts_functions(network, device="cpu")
+        state = UTTTState()
+
+        with patch.object(
+            network, "forward", wraps=network.forward
+        ) as mock_forward:
+            prior = prior_fn(state)
+            val = value_fn(state)
+            # Only one forward pass should have occurred
+            assert mock_forward.call_count == 1
+
+        assert isinstance(prior, dict)
+        assert isinstance(val, float)
+
+    def test_cache_returns_consistent_results(self):
+        """Cached results are identical across repeated calls."""
+        network = _make_network()
+        prior_fn, value_fn = create_nn_mcts_functions(network, device="cpu")
+        state = UTTTState()
+        p1 = prior_fn(state)
+        v1 = value_fn(state)
+        p2 = prior_fn(state)
+        v2 = value_fn(state)
+        assert p1 == p2
+        assert v1 == v2

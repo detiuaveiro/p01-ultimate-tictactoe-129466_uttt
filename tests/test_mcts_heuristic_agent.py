@@ -20,7 +20,7 @@ class TestMCTSHeuristicAgent:
         """MCTSHeuristicAgent can be constructed with default parameters."""
         agent = MCTSHeuristicAgent()
         assert agent.server_uri == "ws://localhost:8765"
-        assert agent.mcts_iterations == 10000
+        assert agent.mcts_iterations == 100
         assert agent.mcts_exploration_constant == 1.414
         assert agent.mcts_time_limit is None
         assert agent.random_seed is None

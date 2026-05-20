@@ -31,6 +31,77 @@ from engine.policy_value_network import (
 )
 
 
+class _NNEvaluator:
+    """Stateful wrapper around a PolicyValueNetwork that caches evaluations.
+
+    Each call to :meth:`evaluate` performs a single forward pass and stores
+    both the policy and value for the state.  Subsequent calls for the same
+    state (e.g. when a leaf later becomes a parent) reuse the cached result.
+    """
+
+    def __init__(
+        self,
+        network: PolicyValueNetwork,
+        device: str,
+        add_dirichlet_noise: bool,
+        dirichlet_alpha: float,
+        dirichlet_epsilon: float,
+        rng: random.Random,
+    ) -> None:
+        self.network = network
+        self.device = device
+        self.add_dirichlet_noise = add_dirichlet_noise
+        self.dirichlet_alpha = dirichlet_alpha
+        self.dirichlet_epsilon = dirichlet_epsilon
+        self.rng = rng
+        self._cache: Dict[int, Tuple[Dict[Tuple[int, int], float], float]] = {}
+
+    def evaluate(
+        self, state: UTTTState
+    ) -> Tuple[Dict[Tuple[int, int], float], float]:
+        """Return ``(policy_dict, value)`` for *state*, using cache if available."""
+        state_key = hash(state)
+        if state_key in self._cache:
+            return self._cache[state_key]
+
+        encoded = encode_state(state).unsqueeze(0).to(self.device)
+        with torch.no_grad():
+            policy_logits, value = self.network(encoded)
+
+        logits = policy_logits.squeeze(0)
+        valid_actions = state.get_valid_actions()
+        probs = get_masked_policy(logits, valid_actions)
+
+        if self.add_dirichlet_noise:
+            dirichlet = torch.from_numpy(
+                _dirichlet_sample(self.dirichlet_alpha, 81, self.rng)
+            ).float()
+            mask = torch.zeros(81, dtype=torch.bool)
+            for x, y in valid_actions:
+                mask[y * 9 + x] = True
+            noisy = (
+                1 - self.dirichlet_epsilon
+            ) * probs + self.dirichlet_epsilon * dirichlet
+            noisy = noisy * mask.float()
+            noisy = noisy / (noisy.sum() + 1e-12)
+            probs = noisy
+
+        policy: Dict[Tuple[int, int], float] = {}
+        for x, y in valid_actions:
+            idx = y * 9 + x
+            policy[(x, y)] = float(probs[idx].item())
+
+        val = float(value.item())
+        self._cache[state_key] = (policy, val)
+        return policy, val
+
+    def prior_fn(self, state: UTTTState) -> Dict[Tuple[int, int], float]:
+        return self.evaluate(state)[0]
+
+    def value_fn(self, state: UTTTState) -> float:
+        return self.evaluate(state)[1]
+
+
 def create_nn_mcts_functions(
     network: PolicyValueNetwork,
     device: str = "cpu",
@@ -59,92 +130,24 @@ def create_nn_mcts_functions(
             ``(x, y)`` to a prior probability (summing to 1).
           - ``value_fn``: ``float`` in ``[-1, 1]`` from the current player's
             perspective.
+
+    Note:
+        Both closures share an internal cache keyed by *state*.  If the same
+        state is queried for both policy and value (e.g. transpositions or
+        future expansion of a previously-simulated leaf) only one forward
+        pass is performed.
     """
     network.eval()
     rng = rng if rng is not None else random.Random()
-
-    # ---- prior_fn closure ----
-
-    def prior_fn(state: UTTTState) -> Dict[Tuple[int, int], float]:
-        """Compute prior probabilities for all legal actions from *state*.
-
-        The state is encoded as a 3 x 9 x 9 tensor and passed through the
-        network.  Illegal actions are masked out and the result is
-        normalised via softmax.
-
-        If ``add_dirichlet_noise`` was set at construction time, Dirichlet
-        noise is mixed into the policy::
-
-            final = (1 - ε) * policy + ε * dirichlet_sample
-
-        Args:
-            state: The game state for which to compute priors.
-
-        Returns:
-            A dict mapping each legal ``(x, y)`` action to its prior
-            probability.  Probabilities sum to 1 over legal actions.
-        """
-        # Encode and add batch dimension
-        encoded = encode_state(state).unsqueeze(0).to(device)  # (1, 3, 9, 9)
-
-        with torch.no_grad():
-            policy_logits, _ = network(encoded)
-
-        # policy_logits: (1, 81) -> squeeze to (81,)
-        logits = policy_logits.squeeze(0)
-
-        # Valid actions
-        valid_actions = state.get_valid_actions()
-
-        # Mask and softmax
-        probs = get_masked_policy(logits, valid_actions)  # (81,)
-
-        # Dirichlet noise at root
-        if add_dirichlet_noise:
-            dirichlet = torch.from_numpy(
-                _dirichlet_sample(dirichlet_alpha, 81, rng)
-            ).float()
-            # Only mix noise into legal positions
-            mask = torch.zeros(81, dtype=torch.bool)
-            for x, y in valid_actions:
-                mask[y * 9 + x] = True
-            # Apply mixing only to legal entries (keep illegal as 0)
-            noisy = (
-                1 - dirichlet_epsilon
-            ) * probs + dirichlet_epsilon * dirichlet
-            # Re-normalise over legal actions
-            noisy = noisy * mask.float()
-            noisy = noisy / (noisy.sum() + 1e-12)
-            probs = noisy
-
-        # Build result dict
-        result: Dict[Tuple[int, int], float] = {}
-        for x, y in valid_actions:
-            idx = y * 9 + x
-            result[(x, y)] = float(probs[idx].item())
-
-        return result
-
-    # ---- value_fn closure ----
-
-    def value_fn(state: UTTTState) -> float:
-        """Evaluate *state* using the network's value head.
-
-        Args:
-            state: The game state to evaluate.
-
-        Returns:
-            A scalar in ``[-1, 1]`` representing the expected outcome from
-            the current player's perspective (positive = favourable).
-        """
-        encoded = encode_state(state).unsqueeze(0).to(device)  # (1, 3, 9, 9)
-
-        with torch.no_grad():
-            _, value = network(encoded)
-
-        return float(value.item())
-
-    return prior_fn, value_fn
+    evaluator = _NNEvaluator(
+        network,
+        device,
+        add_dirichlet_noise,
+        dirichlet_alpha,
+        dirichlet_epsilon,
+        rng,
+    )
+    return evaluator.prior_fn, evaluator.value_fn
 
 
 # ---------------------------------------------------------------------------

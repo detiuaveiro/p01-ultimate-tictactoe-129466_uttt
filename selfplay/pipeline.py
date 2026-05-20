@@ -215,40 +215,52 @@ def _load_network_from_path(path: str, device: str) -> PolicyValueNetwork:
     return network
 
 
-def _evaluate_candidate_vs_fixed(
+def _evaluate_arena(
     candidate_path: str,
+    best_path: str,
     num_games: int,
     device: str,
-) -> float:
-    """Pit a candidate AZ network against a fixed MCTS+Heuristic opponent.
+    mcts_iterations: int = 200,
+    update_threshold: float = 0.55,
+) -> Tuple[float, bool]:
+    """Pit a candidate network against the previous best network (Arena).
+
+    Follows the standard AlphaZero acceptance criteria: the candidate is
+    accepted if its score (wins + 0.5 * draws) / num_games >= threshold.
 
     Args:
         candidate_path: Path to the candidate checkpoint.
-        num_games: Number of evaluation games to play.
+        best_path: Path to the current best checkpoint.
+        num_games: Number of evaluation games to play (recommended even).
         device: Device for inference.
+        mcts_iterations: MCTS iterations for both agents during evaluation.
+        update_threshold: Minimum win-rate (including draws as 0.5) to accept
+            the candidate.
 
     Returns:
-        Candidate win rate (0.0 to 1.0).
+        Tuple of (candidate_score, accepted) where *candidate_score* is
+        ``(wins + 0.5 * draws) / num_games``.
     """
     from agents.alphazero_agent import AlphaZeroUTTTAgent
-    from agents.mcts_heuristic_agent import MCTSHeuristicAgent
     from tournament.runner import _play_single_game
 
     candidate_agent = AlphaZeroUTTTAgent(
         checkpoint_path=candidate_path,
-        mcts_iterations=100,
+        mcts_iterations=mcts_iterations,
+        temperature=0.0,
         device=device,
     )
-    opponent = MCTSHeuristicAgent(
-        mcts_iterations=100,
-        random_seed=12345,
+    best_agent = AlphaZeroUTTTAgent(
+        checkpoint_path=best_path,
+        mcts_iterations=mcts_iterations,
+        temperature=0.0,
+        device=device,
     )
 
-    wins = 0
-    draws = 0
+    score = 0.0
     for i in tqdm(
         range(num_games),
-        desc="Evaluating candidate vs MCTS+Heuristic",
+        desc="Arena: candidate vs best",
         unit="game",
         leave=False,
         position=0,
@@ -256,10 +268,10 @@ def _evaluate_candidate_vs_fixed(
         candidate_is_p1 = i % 2 == 0
         result = _play_single_game(
             game_idx=i,
-            agent1=candidate_agent if candidate_is_p1 else opponent,
-            agent2=opponent if candidate_is_p1 else candidate_agent,
-            agent1_name="Candidate" if candidate_is_p1 else "Opponent",
-            agent2_name="Opponent" if candidate_is_p1 else "Candidate",
+            agent1=candidate_agent if candidate_is_p1 else best_agent,
+            agent2=best_agent if candidate_is_p1 else candidate_agent,
+            agent1_name="Candidate" if candidate_is_p1 else "Best",
+            agent2_name="Best" if candidate_is_p1 else "Candidate",
             agent1_config="",
             agent2_config="",
             seed=42 + i,
@@ -267,35 +279,20 @@ def _evaluate_candidate_vs_fixed(
             num_games=num_games,
         )
         if result["winner"] == 3:
-            draws += 1
-        elif candidate_is_p1 and result["winner"] == 1:
-            wins += 1
-        elif not candidate_is_p1 and result["winner"] == 2:
-            wins += 1
+            score += 0.5
+        elif (candidate_is_p1 and result["winner"] == 1) or (
+            not candidate_is_p1 and result["winner"] == 2
+        ):
+            score += 1.0
 
-        p1_name = "Candidate" if candidate_is_p1 else "Opponent"
-        p2_name = "Opponent" if candidate_is_p1 else "Candidate"
-        if result["winner"] == 3:
-            outcome_str = "draw"
-        elif result["winner"] == 1:
-            outcome_str = f"{p1_name} wins"
-        else:
-            outcome_str = f"{p2_name} wins"
-        tqdm.write(
-            f"Eval {i+1}/{num_games}: "
-            f"Candidate={'P1' if candidate_is_p1 else 'P2'} – "
-            f"{outcome_str} "
-            f"(Candidate score: {wins}/{i+1})"
-        )
-
-    win_rate = wins / num_games if num_games > 0 else 0.0
-    draw_rate = draws / num_games if num_games > 0 else 0.0
+    candidate_score = score / num_games if num_games > 0 else 0.0
+    accepted = candidate_score >= update_threshold
     logger.info(
-        f"Candidate evaluation: {wins}W-{draws}D-"
-        f"{num_games - wins - draws}L "
-        f"(win_rate={win_rate:.1%}, draw_rate={draw_rate:.1%})"
+        f"Arena result: {candidate_score:.1%} "
+        f"(threshold={update_threshold:.0%}) "
+        f"- {'ACCEPTED' if accepted else 'REJECTED'}"
     )
-    return win_rate
+    return candidate_score, accepted
 
 
 # ---------------------------------------------------------------------------
@@ -378,8 +375,6 @@ def run_pipeline(
     _MAX_REPLAY_EXAMPLES = 500_000
     replay_buffer: List[List[TrainingExample]] = []
     best_path: Optional[str] = None
-    peak_score: float = 0.0
-    peak_path: str = ""
 
     # Create shared executor once for all iterations (avoids tqdm lock issues)
     executor: Optional[ProcessPoolExecutor] = None
@@ -543,32 +538,29 @@ def run_pipeline(
                 f"Phase 1: iteration {global_iter}/10 auto-promoted."
             )
         else:
-            # Phase 2 (iteration 11+): evaluate against fixed opponent
+            # Phase 2 (iteration 11+): Arena evaluation against previous best
             logger.info(
-                f"Phase 2: evaluating candidate (peak={peak_score:.1%})"
+                f"Phase 2: arena candidate vs best ({best_path})"
             )
-            win_rate = _evaluate_candidate_vs_fixed(
-                iter_path, num_games=20, device=device
+            candidate_score, accepted = _evaluate_arena(
+                iter_path,
+                best_path,
+                num_games=20,
+                device=device,
+                mcts_iterations=200,
             )
-            logger.info(f"Candidate win rate vs MCTS+Heuristic: {win_rate:.1%}")
-            if win_rate > peak_score:
-                peak_score = win_rate
-                peak_path = iter_path
+            if accepted:
                 best_path = iter_path
                 shutil.copy(iter_path, best_pt)
                 logger.info(
-                    f"New peak! Candidate promoted (peak={peak_score:.1%})"
+                    f"Candidate accepted! Score={candidate_score:.1%}"
                 )
             else:
                 logger.info(
-                    f"Candidate did not beat peak "
-                    f"({win_rate:.1%} <= {peak_score:.1%}). "
-                    f"Restoring peak network."
+                    f"Candidate rejected. Score={candidate_score:.1%}. "
+                    f"Restoring best network."
                 )
-                if peak_path:
-                    network = _load_network_from_path(peak_path, device)
-                elif best_path:
-                    network = _load_network_from_path(best_path, device)
+                network = _load_network_from_path(best_path, device)
 
         logger.info(
             f"Completed iteration {global_iter}/{config.num_iterations}"

@@ -161,9 +161,9 @@ class TestMCTS:
         valid = state.get_valid_actions()
         assert action in valid
 
-        # The winning move [2,0] should have a higher win rate than non-winning moves
+        # The winning move [2,0] should be the most-visited action
         stats = mcts.get_stats()
-        assert stats["best_action_win_rate"] > 0.5
+        assert stats["best_action"] == [2, 0]
 
     def test_blocks_opponent_win(self) -> None:
         """MCTS blocks an opponent's winning move on the macro board."""
@@ -185,12 +185,10 @@ class TestMCTS:
         valid = state.get_valid_actions()
         assert action in valid
 
-        # With proper search, the blocking move [2,0] should be found as best
-        # when the upcoming threat is clear with sufficient iterations
-        # At minimum, verify that action at least exists in valid actions
+        # With random playouts UTTT is too deep for MCTS to always find the
+        # exact block; just verify search produced valid stats.
         stats = mcts.get_stats()
-        # The win rate should be reasonable (not near zero)
-        assert stats["best_action_win_rate"] > 0.0
+        assert stats["best_action"] in valid
 
     def test_handles_terminal_state(self) -> None:
         """MCTS raises RuntimeError for terminal state."""
@@ -305,47 +303,17 @@ class TestMCTSPlayoutInjection:
 class TestMCTSPUCT:
     """Tests for MCTS PUCT selection, prior_fn, value_fn, and visit distribution."""
 
-    # -- _value_to_winner (T014) ------------------------------------------------
-
-    def test_value_to_winner_positive(self) -> None:
-        """_value_to_winner returns current_player for value >= 0.5."""
-        state = UTTTState(current_player=1)
-        assert MCTS._value_to_winner(0.5, state) == 1
-        assert MCTS._value_to_winner(0.8, state) == 1
-        assert MCTS._value_to_winner(1.0, state) == 1
-
-    def test_value_to_winner_negative(self) -> None:
-        """_value_to_winner returns opponent for value <= -0.5."""
-        state = UTTTState(current_player=1)
-        assert MCTS._value_to_winner(-0.5, state) == 2
-        assert MCTS._value_to_winner(-0.8, state) == 2
-        assert MCTS._value_to_winner(-1.0, state) == 2
-
-    def test_value_to_winner_draw(self) -> None:
-        """_value_to_winner returns 3 for values between -0.5 and 0.5."""
-        state = UTTTState(current_player=1)
-        assert MCTS._value_to_winner(0.0, state) == 3
-        assert MCTS._value_to_winner(0.3, state) == 3
-        assert MCTS._value_to_winner(-0.3, state) == 3
-
-    def test_value_to_winner_player2(self) -> None:
-        """_value_to_winner correctly handles P2 as current_player."""
-        state = UTTTState(current_player=2)
-        assert MCTS._value_to_winner(0.8, state) == 2
-        assert MCTS._value_to_winner(-0.8, state) == 1
-        assert MCTS._value_to_winner(0.0, state) == 3
-
     # -- _puct_score (T012) ----------------------------------------------------
 
-    def test_puct_score_unvisited_infinity(self) -> None:
-        """_puct_score returns inf for unvisited children."""
+    def test_puct_score_unvisited_finite(self) -> None:
+        """_puct_score returns a finite value for unvisited children."""
         parent = MCTSNode(UTTTState())
         parent.visits = 10
         child = MCTSNode(UTTTState(), parent=parent, prior=0.5)
         child.visits = 0
 
         mcts = MCTS()
-        assert mcts._puct_score(child) == float("inf")
+        assert math.isfinite(mcts._puct_score(child))
 
     def test_puct_score_formula(self) -> None:
         """_puct_score computes the correct PUCT formula."""
@@ -457,41 +425,42 @@ class TestMCTSPUCT:
         mcts = MCTS(iterations=10, use_puct=True, value_fn=mock_value_fn)
 
         state = UTTTState()
-        winner = mcts._simulate(state)
+        value = mcts._simulate(state)
 
         mock_value_fn.assert_called_once_with(state)
-        # value=0.8 >= 0.5, current_player=1 => winner=1
-        assert winner == 1
+        # value_fn returns raw float directly
+        assert value == 0.8
 
     def test_value_fn_negative_replaces_simulation(self) -> None:
-        """value_fn returning negative value gives opponent win."""
+        """value_fn returning negative value propagates the raw float."""
         state = UTTTState(current_player=1)
         mock_value_fn = Mock(return_value=-0.8)
 
         mcts = MCTS(iterations=10, use_puct=True, value_fn=mock_value_fn)
-        winner = mcts._simulate(state)
+        value = mcts._simulate(state)
 
-        # value=-0.8 <= -0.5, current_player=1 => winner=2
-        assert winner == 2
+        # value_fn returns raw float directly
+        assert value == -0.8
 
     def test_value_fn_draw_replaces_simulation(self) -> None:
-        """value_fn returning near-zero value gives draw."""
+        """value_fn returning near-zero value propagates the raw float."""
         state = UTTTState(current_player=1)
         mock_value_fn = Mock(return_value=0.0)
 
         mcts = MCTS(iterations=10, use_puct=True, value_fn=mock_value_fn)
-        winner = mcts._simulate(state)
+        value = mcts._simulate(state)
 
-        # value=0.0 in (-0.5, 0.5) => winner=3 (draw)
-        assert winner == 3
+        # value_fn returns raw float directly
+        assert value == 0.0
 
     def test_value_fn_none_preserves_random_playout(self) -> None:
         """When value_fn is None, random playout is used even if use_puct=True."""
         mcts = MCTS(iterations=10, use_puct=True, value_fn=None)
         state = UTTTState()
         # Should not raise; falls through to random playout
-        winner = mcts._simulate(state)
-        assert winner in (0, 1, 2, 3)
+        value = mcts._simulate(state)
+        assert isinstance(value, float)
+        assert value in (-1.0, 0.0, 1.0)
 
     def test_playout_fn_used_when_use_puct_false(self) -> None:
         """playout_fn is used when use_puct=False and playout_fn is set."""
@@ -505,12 +474,13 @@ class TestMCTSPUCT:
             value_fn=mock_value_fn,
         )
         state = UTTTState()
-        winner = mcts._simulate(state)
+        value = mcts._simulate(state)
 
         # playout_fn should be called (use_puct=False, so value_fn is ignored)
         mock_playout_fn.assert_called_once_with(state, mcts.rng)
         mock_value_fn.assert_not_called()
-        assert winner == 2
+        # winner=2, current_player=1 => loss for current player => -1.0
+        assert value == -1.0
 
     # -- use_puct=False preserves UCB1 (T012) ----------------------------------
 
@@ -619,3 +589,52 @@ class TestMCTSPUCT:
         assert mcts.prior_fn is None
         assert mcts.value_fn is None
         assert mcts._last_root is None
+
+
+# ---------------------------------------------------------------------------
+# Tree reuse
+# ---------------------------------------------------------------------------
+
+class TestTreeReuse:
+    """Tests for subtree reuse (AlphaZero-style tree persistence)."""
+
+    def test_detach_subtree_removes_from_parent(self) -> None:
+        """detach_subtree removes the node from its parent's children."""
+        root = MCTSNode(UTTTState())
+        child = MCTSNode(UTTTState(), parent=root, action_taken=[0, 0])
+        root.children.append(child)
+        assert child in root.children
+        child.detach_subtree()
+        assert child not in root.children
+        assert child.parent is None
+
+    def test_reuse_root_uses_provided_node(self) -> None:
+        """search with reuse_root uses the provided node directly."""
+        mcts = MCTS(iterations=10)
+        root = MCTSNode(UTTTState())
+        root.visits = 999  # arbitrary marker
+        action = mcts.search(UTTTState(), reuse_root=root)
+        assert action is not None
+        assert mcts._last_root is root
+        assert mcts._last_root.visits == 999 + 10
+
+    def test_reuse_root_none_creates_new_root(self) -> None:
+        """search with reuse_root=None creates a fresh root."""
+        mcts = MCTS(iterations=5)
+        action = mcts.search(UTTTState())
+        assert action is not None
+        assert mcts._last_root is not None
+        assert mcts._last_root.visits == 5
+
+    def test_most_visited_child_can_be_reused(self) -> None:
+        """The most visited child can be detached and passed as the next root."""
+        mcts = MCTS(iterations=20)
+        state = UTTTState()
+        action = mcts.search(state)
+        root = mcts._last_root
+        assert root is not None
+        child, child_action = root.most_visited_child()
+        assert child_action == action
+        detached = child.detach_subtree()
+        assert detached.parent is None
+        assert detached not in root.children

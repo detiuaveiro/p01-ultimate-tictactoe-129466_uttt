@@ -93,6 +93,7 @@ class AlphaZeroUTTTAgent(BaseUTTTAgent):
         # Lazy network init for pickling support
         self._network: Optional[PolicyValueNetwork] = None
         self._last_stats: Dict[str, Any] = {}
+        self._last_root: Optional[Any] = None  # reused MCTS subtree
 
     # ------------------------------------------------------------------
     # Lazy network initialisation
@@ -244,7 +245,7 @@ class AlphaZeroUTTTAgent(BaseUTTTAgent):
         )
 
         try:
-            best_action = mcts.search(state)
+            best_action = mcts.search(state, reuse_root=self._last_root)
         except RuntimeError as exc:
             logging.warning(f"MCTS search failed: {exc}")
             return valid_actions[0] if valid_actions else None
@@ -267,6 +268,21 @@ class AlphaZeroUTTTAgent(BaseUTTTAgent):
         stats["temperature"] = self.temperature
         stats["inference_elapsed"] = elapsed
         self._last_stats = stats
+
+        # ---- Tree reuse: cache subtree for next move ----
+        from engine.mcts_core import MCTSNode
+
+        last_root = mcts._last_root
+        if last_root is not None:
+            # Find the child matching the selected action and detach it
+            for child in last_root.children:
+                if child.action_taken == selected_action:
+                    self._last_root = child.detach_subtree()
+                    break
+            else:
+                self._last_root = None
+        else:
+            self._last_root = None
 
         logging.debug(
             f"AlphaZero search completed in {elapsed:.3f}s: "

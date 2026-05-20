@@ -19,6 +19,7 @@ from engine.game_state import UTTTState
 from engine.mcts_core import MCTS
 from engine.nn_mcts_bridge import create_nn_mcts_functions
 from engine.policy_value_network import PolicyValueNetwork, encode_state
+from engine.symmetry import augment_example
 from selfplay.config import SelfPlayConfig
 from utils.progress import WorkerGameBar
 
@@ -247,6 +248,7 @@ def generate_self_play_games(
     for game_idx in range(config.games_per_iteration):
         game_examples: List[TrainingExample] = []
         state = UTTTState()
+        last_root = None
 
         progress = WorkerGameBar(
             worker_index,
@@ -284,7 +286,7 @@ def generate_self_play_games(
 
             try:
                 progress.set_status("searching...")
-                mcts.search(state)
+                mcts.search(state, reuse_root=last_root)
                 progress.set_status("")
             except RuntimeError:
                 progress.set_status("")
@@ -292,6 +294,7 @@ def generate_self_play_games(
                 action = rng.choice(valid)
                 _record_example(game_examples, state, _uniform_policy(valid), 0.0)
                 state = state.apply_action(action[0], action[1])
+                last_root = None
                 progress.on_move()
                 continue
 
@@ -307,6 +310,18 @@ def generate_self_play_games(
             # Sample action from search policy
             action = sample_action(search_policy, valid, temperature, rng)
 
+            # Cache chosen child's subtree for next move
+            root = mcts._last_root
+            if root is not None:
+                for child in root.children:
+                    if child.action_taken == action:
+                        last_root = child.detach_subtree()
+                        break
+                else:
+                    last_root = None
+            else:
+                last_root = None
+
             # Apply action
             state = state.apply_action(action[0], action[1])
 
@@ -317,6 +332,22 @@ def generate_self_play_games(
         # Game finished: assign outcomes
         winner = state.get_winner()
         _assign_outcomes(game_examples, winner)
+
+        # Augment with all 8 D4 symmetries
+        if config.augment_symmetries:
+            augmented: List[TrainingExample] = []
+            for ex in game_examples:
+                for aug_board, aug_policy, aug_outcome in augment_example(
+                    ex.state_features, ex.search_policy, ex.outcome
+                ):
+                    augmented.append(
+                        TrainingExample(
+                            state_features=aug_board,
+                            search_policy=aug_policy,
+                            outcome=aug_outcome,
+                        )
+                    )
+            game_examples = augmented
 
         examples.extend(game_examples)
 

@@ -37,10 +37,10 @@ class TestSelfPlayConfig:
         config = SelfPlayConfig()
         assert config.num_iterations == 30
         assert config.games_per_iteration == 100
-        assert config.mcts_iterations == 100
+        assert config.mcts_iterations == 400
         assert config.c_puct == 1.0
         assert config.temperature_schedule == [
-            (0, 1.0), (10, 0.5), (20, 0.25)
+            (0, 1.0), (15, 1.0), (16, 0.0)
         ]
         assert config.dirichlet_alpha == 0.3
         assert config.dirichlet_epsilon == 0.25
