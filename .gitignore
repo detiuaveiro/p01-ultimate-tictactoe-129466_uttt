@@ -9,6 +9,7 @@ stats/
 
 # Alphazero training
 checkpoints/
+checkpoints_old/
 
 .ruff*
 pyrightconfig.json

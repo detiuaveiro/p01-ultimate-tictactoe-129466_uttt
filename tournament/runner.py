@@ -779,6 +779,12 @@ def _resolve_agent(name: str, args: argparse.Namespace) -> Any:
                 file=sys.stderr,
             )
             sys.exit(1)
+        if args.iterations is not None:
+            kwargs["mcts_iterations"] = args.iterations
+        if args.exploration_constant is not None:
+            kwargs["mcts_exploration_constant"] = args.exploration_constant
+        if args.time_limit is not None:
+            kwargs["mcts_time_limit"] = args.time_limit
         if args.temperature is not None:
             kwargs["temperature"] = args.temperature
         kwargs["device"] = args.device

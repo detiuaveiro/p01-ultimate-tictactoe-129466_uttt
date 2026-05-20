@@ -35,18 +35,18 @@ class TestSelfPlayConfig:
     def test_defaults(self) -> None:
         """Config can be created with default values."""
         config = SelfPlayConfig()
-        assert config.num_iterations == 10
+        assert config.num_iterations == 30
         assert config.games_per_iteration == 100
         assert config.mcts_iterations == 100
-        assert config.c_puct == 1.414
+        assert config.c_puct == 1.0
         assert config.temperature_schedule == [
             (0, 1.0), (10, 0.5), (20, 0.25)
         ]
         assert config.dirichlet_alpha == 0.3
         assert config.dirichlet_epsilon == 0.25
-        assert config.learning_rate == 0.001
-        assert config.batch_size == 32
-        assert config.epochs == 5
+        assert config.learning_rate == 0.002
+        assert config.batch_size == 256
+        assert config.epochs == 3
         assert config.checkpoint_dir == "checkpoints/"
         assert config.l2_regularization == 0.0001
         assert config.network_channels == 160

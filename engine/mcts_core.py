@@ -223,6 +223,16 @@ class MCTS:
 
         # Optimization: if only one action, return immediately
         if len(valid_actions) == 1:
+            self._last_stats = {
+                "total_iterations": 0,
+                "tree_size": 1,
+                "root_visits": 0,
+                "best_action": valid_actions[0],
+                "best_action_visits": 0,
+                "best_action_win_rate": 0.0,
+                "elapsed_seconds": 0.0,
+            }
+            self._last_root = None
             return valid_actions[0]
 
         root = MCTSNode(state)
@@ -284,13 +294,12 @@ class MCTS:
             child: The child MCTSNode to score.
 
         Returns:
-            float: The PUCT score. Returns infinity for unvisited children.
+            float: The PUCT score. Returns infinitiy for unvisited children.
         """
-        if child.visits == 0:
-            return float("inf")
-        q_value = child.wins / child.visits
         c_puct = self.exploration_constant
         parent_visits = child.parent.visits if child.parent else 1
+        # AlphaZero-style: always use prior, even for unvisited children
+        q_value = child.wins / child.visits if child.visits > 0 else 0.0
         exploration = (
             c_puct * child.prior * math.sqrt(parent_visits) / (1 + child.visits)
         )

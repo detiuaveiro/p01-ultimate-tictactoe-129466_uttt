@@ -10,10 +10,11 @@ Supports resuming from the latest checkpoint if interrupted.
 """
 
 import argparse
-import concurrent.futures
+import copy
 import logging
 import os
 import random
+import shutil
 import signal
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -189,6 +190,114 @@ def _generate_games_worker(
     )
 
 
+def _load_network_from_path(path: str, device: str) -> PolicyValueNetwork:
+    """Load a PolicyValueNetwork from a checkpoint file.
+
+    Args:
+        path: Path to the checkpoint (.pt file).
+        device: Device to load the network onto.
+
+    Returns:
+        The loaded PolicyValueNetwork in eval mode on the requested device.
+    """
+    data = torch.load(path, map_location=device, weights_only=True)
+    if isinstance(data, dict) and "state_dict" in data:
+        network = PolicyValueNetwork(
+            channels=data.get("channels", 160),
+            num_res_blocks=data.get("num_res_blocks", 10),
+        )
+        network.load_state_dict(data["state_dict"])
+    else:
+        network = PolicyValueNetwork()
+        network.load_state_dict(data)
+    network.to(device)
+    network.eval()
+    return network
+
+
+def _evaluate_candidate_vs_fixed(
+    candidate_path: str,
+    num_games: int,
+    device: str,
+) -> float:
+    """Pit a candidate AZ network against a fixed MCTS+Heuristic opponent.
+
+    Args:
+        candidate_path: Path to the candidate checkpoint.
+        num_games: Number of evaluation games to play.
+        device: Device for inference.
+
+    Returns:
+        Candidate win rate (0.0 to 1.0).
+    """
+    from agents.alphazero_agent import AlphaZeroUTTTAgent
+    from agents.mcts_heuristic_agent import MCTSHeuristicAgent
+    from tournament.runner import _play_single_game
+
+    candidate_agent = AlphaZeroUTTTAgent(
+        checkpoint_path=candidate_path,
+        mcts_iterations=100,
+        device=device,
+    )
+    opponent = MCTSHeuristicAgent(
+        mcts_iterations=100,
+        random_seed=12345,
+    )
+
+    wins = 0
+    draws = 0
+    for i in tqdm(
+        range(num_games),
+        desc="Evaluating candidate vs MCTS+Heuristic",
+        unit="game",
+        leave=False,
+        position=0,
+    ):
+        candidate_is_p1 = i % 2 == 0
+        result = _play_single_game(
+            game_idx=i,
+            agent1=candidate_agent if candidate_is_p1 else opponent,
+            agent2=opponent if candidate_is_p1 else candidate_agent,
+            agent1_name="Candidate" if candidate_is_p1 else "Opponent",
+            agent2_name="Opponent" if candidate_is_p1 else "Candidate",
+            agent1_config="",
+            agent2_config="",
+            seed=42 + i,
+            verbose=False,
+            num_games=num_games,
+        )
+        if result["winner"] == 3:
+            draws += 1
+        elif candidate_is_p1 and result["winner"] == 1:
+            wins += 1
+        elif not candidate_is_p1 and result["winner"] == 2:
+            wins += 1
+
+        p1_name = "Candidate" if candidate_is_p1 else "Opponent"
+        p2_name = "Opponent" if candidate_is_p1 else "Candidate"
+        if result["winner"] == 3:
+            outcome_str = "draw"
+        elif result["winner"] == 1:
+            outcome_str = f"{p1_name} wins"
+        else:
+            outcome_str = f"{p2_name} wins"
+        tqdm.write(
+            f"Eval {i+1}/{num_games}: "
+            f"Candidate={'P1' if candidate_is_p1 else 'P2'} – "
+            f"{outcome_str} "
+            f"(Candidate score: {wins}/{i+1})"
+        )
+
+    win_rate = wins / num_games if num_games > 0 else 0.0
+    draw_rate = draws / num_games if num_games > 0 else 0.0
+    logger.info(
+        f"Candidate evaluation: {wins}W-{draws}D-"
+        f"{num_games - wins - draws}L "
+        f"(win_rate={win_rate:.1%}, draw_rate={draw_rate:.1%})"
+    )
+    return win_rate
+
+
 # ---------------------------------------------------------------------------
 # Pipeline runner
 # ---------------------------------------------------------------------------
@@ -264,6 +373,13 @@ def run_pipeline(
     # 2. Main loop
     # ------------------------------------------------------------------
     rng = random.Random(42)  # fixed seed for reproducibility
+
+    # Replay buffer: keep examples from recent iterations, capped by total count
+    _MAX_REPLAY_EXAMPLES = 500_000
+    replay_buffer: List[List[TrainingExample]] = []
+    best_path: Optional[str] = None
+    peak_score: float = 0.0
+    peak_path: str = ""
 
     # Create shared executor once for all iterations (avoids tqdm lock issues)
     executor: Optional[ProcessPoolExecutor] = None
@@ -382,24 +498,80 @@ def run_pipeline(
 
         logger.info(f"Generated {len(examples)} training examples.")
 
-        # b) Train network
+        # b) Add to replay buffer and cap by total examples
+        replay_buffer.append(examples)
+        _total = sum(len(b) for b in replay_buffer)
+        while _total > _MAX_REPLAY_EXAMPLES and len(replay_buffer) > 1:
+            _total -= len(replay_buffer.pop(0))
+        flat_examples: List[TrainingExample] = [
+            ex for batch in replay_buffer for ex in batch
+        ]
+        logger.info(
+            f"Replay buffer: {len(flat_examples)} examples from "
+            f"{len(replay_buffer)} iteration(s)."
+        )
+
+        # c) Train network
         logger.info("Training network...")
         network = train_network(
             network=network,
-            examples=examples,
+            examples=flat_examples,
             config=config,
             device=device,
         )
 
-        # c) Save checkpoint
-        save_checkpoint(
+        # d) Save iteration checkpoint
+        iter_path = save_checkpoint(
             network=network,
             iteration=iteration,
             path=config.checkpoint_dir,
         )
 
+        # e) Evaluation gate
+        best_pt = os.path.join(config.checkpoint_dir, "best.pt")
+        global_iter = iteration + 1
+        if best_path is None:
+            # First iteration: always promote
+            best_path = iter_path
+            shutil.copy(iter_path, best_pt)
+            logger.info("First iteration promoted to best.")
+        elif global_iter <= 10:
+            # Phase 1 (iterations 2–10): auto-promote to bootstrap
+            best_path = iter_path
+            shutil.copy(iter_path, best_pt)
+            logger.info(
+                f"Phase 1: iteration {global_iter}/10 auto-promoted."
+            )
+        else:
+            # Phase 2 (iteration 11+): evaluate against fixed opponent
+            logger.info(
+                f"Phase 2: evaluating candidate (peak={peak_score:.1%})"
+            )
+            win_rate = _evaluate_candidate_vs_fixed(
+                iter_path, num_games=20, device=device
+            )
+            logger.info(f"Candidate win rate vs MCTS+Heuristic: {win_rate:.1%}")
+            if win_rate > peak_score:
+                peak_score = win_rate
+                peak_path = iter_path
+                best_path = iter_path
+                shutil.copy(iter_path, best_pt)
+                logger.info(
+                    f"New peak! Candidate promoted (peak={peak_score:.1%})"
+                )
+            else:
+                logger.info(
+                    f"Candidate did not beat peak "
+                    f"({win_rate:.1%} <= {peak_score:.1%}). "
+                    f"Restoring peak network."
+                )
+                if peak_path:
+                    network = _load_network_from_path(peak_path, device)
+                elif best_path:
+                    network = _load_network_from_path(best_path, device)
+
         logger.info(
-            f"Completed iteration {iteration + 1}/{config.num_iterations}"
+            f"Completed iteration {global_iter}/{config.num_iterations}"
         )
 
     logger.info("Pipeline complete.")

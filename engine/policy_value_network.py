@@ -150,6 +150,8 @@ class PolicyValueNetwork(nn.Module):
 def encode_state(state: UTTTState) -> torch.Tensor:
     """Encode a UTTTState as a 3 x 9 x 9 tensor for the neural network.
 
+    Uses vectorised operations for speed.
+
     Channel layout:
       - Channel 0: Current player's stones (1.0 where current player occupies).
       - Channel 1: Opponent's stones (1.0 where opponent occupies).
@@ -167,47 +169,37 @@ def encode_state(state: UTTTState) -> torch.Tensor:
     Returns:
         A float32 tensor of shape (3, 9, 9).
     """
-    board = state._board  # direct access for speed (no copy needed)
-    macro_board = state._macro_board
+    import numpy as np
+
+    board_arr = np.array(state._board, dtype=np.int8)  # (9, 9)
+    macro_arr = np.array(state._macro_board, dtype=np.int8)  # (3, 3)
     active_macro = state._active_macro
     current_player = state.current_player
     opponent = 3 - current_player
 
-    # Allocate 3 channels
-    channels = torch.zeros(3, 9, 9, dtype=torch.float32)
+    channels = np.zeros((3, 9, 9), dtype=np.float32)
 
     # Channel 0: current player's stones
-    for y in range(9):
-        for x in range(9):
-            if board[y][x] == current_player:
-                channels[0, y, x] = 1.0
-
+    channels[0] = (board_arr == current_player).astype(np.float32)
     # Channel 1: opponent's stones
-    for y in range(9):
-        for x in range(9):
-            if board[y][x] == opponent:
-                channels[1, y, x] = 1.0
+    channels[1] = (board_arr == opponent).astype(np.float32)
 
     # Channel 2: metadata
     if active_macro is not None:
-        # Active macro-board: set to 1.0 in the corresponding 3x3 region
         my, mx = active_macro[0], active_macro[1]
-        for dy in range(3):
-            for dx in range(3):
-                channels[2, my * 3 + dy, mx * 3 + dx] = 1.0
+        channels[2, my * 3:(my + 1) * 3, mx * 3:(mx + 1) * 3] = 1.0
     else:
-        # Free move: fill 1/9 in all unresolved macro-boards
+        # Free move: mark unresolved macro-boards
         for my in range(3):
             for mx in range(3):
-                if macro_board[my][mx] == 0:  # unresolved
-                    for dy in range(3):
-                        for dx in range(3):
-                            channels[2, my * 3 + dy, mx * 3 + dx] = 1.0 / 9.0
+                if macro_arr[my, mx] == 0:
+                    channels[2, my * 3:(my + 1) * 3, mx * 3:(mx + 1) * 3] = 1.0 / 9.0
+
     # Player offset
     offset = 0.25 if current_player == 1 else -0.25
     channels[2] += offset
 
-    return channels
+    return torch.from_numpy(channels)
 
 
 # ---------------------------------------------------------------------------

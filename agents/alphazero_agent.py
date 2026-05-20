@@ -28,6 +28,11 @@ from engine.policy_value_network import (
     load_network,
 )
 
+# Module-level cache: maps (checkpoint_path, device) -> PolicyValueNetwork
+# This avoids reloading the network from disk every time a new agent
+# instance is created during tournament play.
+_NETWORK_CACHE: Dict[Tuple[str, str], PolicyValueNetwork] = {}
+
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - ALPHAZERO - %(message)s"
 )
@@ -96,6 +101,10 @@ class AlphaZeroUTTTAgent(BaseUTTTAgent):
     def _get_network(self) -> PolicyValueNetwork:
         """Return the neural network, loading it lazily if needed.
 
+        Uses a module-level cache keyed by ``(checkpoint_path, device)``
+        so that multiple agent instances created during a tournament
+        reuse the same in-memory network.
+
         Returns:
             The PolicyValueNetwork instance (in eval mode) on ``self.device``.
 
@@ -108,7 +117,15 @@ class AlphaZeroUTTTAgent(BaseUTTTAgent):
                     "No checkpoint path specified. "
                     "Provide checkpoint_path to load the network."
                 )
-            self._network = load_network(self.checkpoint_path, device=self.device)
+            cache_key = (self.checkpoint_path, self.device)
+            if cache_key in _NETWORK_CACHE:
+                self._network = _NETWORK_CACHE[cache_key]
+                logging.debug("Reusing cached network for %s", cache_key)
+            else:
+                self._network = load_network(
+                    self.checkpoint_path, device=self.device
+                )
+                _NETWORK_CACHE[cache_key] = self._network
             self._network.eval()
         return self._network
 
@@ -254,9 +271,9 @@ class AlphaZeroUTTTAgent(BaseUTTTAgent):
         logging.debug(
             f"AlphaZero search completed in {elapsed:.3f}s: "
             f"action={selected_action}, "
-            f"iterations={stats['total_iterations']}, "
-            f"tree_size={stats['tree_size']}, "
-            f"win_rate={stats['best_action_win_rate']:.3f}"
+            f"iterations={stats.get('total_iterations', 0)}, "
+            f"tree_size={stats.get('tree_size', 0)}, "
+            f"win_rate={stats.get('best_action_win_rate', 0.0):.3f}"
         )
 
         # Safety: validate the returned action

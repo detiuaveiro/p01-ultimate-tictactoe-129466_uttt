@@ -35,18 +35,18 @@ class SelfPlayConfig:
             When > 1, games are distributed across worker processes.
     """
 
-    num_iterations: int = 10
+    num_iterations: int = 30
     games_per_iteration: int = 100
     mcts_iterations: int = 100
-    c_puct: float = 1.414
+    c_puct: float = 1.0
     temperature_schedule: List[Tuple[int, float]] = field(
         default_factory=lambda: [(0, 1.0), (10, 0.5), (20, 0.25)]
     )
     dirichlet_alpha: float = 0.3
     dirichlet_epsilon: float = 0.25
-    learning_rate: float = 0.001
-    batch_size: int = 32
-    epochs: int = 5
+    learning_rate: float = 0.002
+    batch_size: int = 256
+    epochs: int = 3
     checkpoint_dir: str = "checkpoints/"
     l2_regularization: float = 0.0001
     network_channels: int = 160
